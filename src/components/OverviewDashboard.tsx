@@ -18,8 +18,18 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { useGbpAuth } from '../context/GbpAuthContext';
 import { useOps } from '../context/OpsContext';
-import { SYNC_HISTORY_7D } from '../data/initialReviews';
+import type { SyncHistoryPoint } from '../types/ops';
 import { StatusBadge } from './StatusBadge';
+
+const SYNC_HISTORY_7D: SyncHistoryPoint[] = [
+  { day: '10 Nov', syncRate: 76.4, resolvedDiscrepancies: 118, incomingReviews: 42, repliedReviews: 35 },
+  { day: '11 Nov', syncRate: 77.9, resolvedDiscrepancies: 145, incomingReviews: 51, repliedReviews: 44 },
+  { day: '12 Nov', syncRate: 79.1, resolvedDiscrepancies: 132, incomingReviews: 39, repliedReviews: 36 },
+  { day: '13 Nov', syncRate: 80.5, resolvedDiscrepancies: 164, incomingReviews: 47, repliedReviews: 42 },
+  { day: '14 Nov', syncRate: 81.8, resolvedDiscrepancies: 179, incomingReviews: 54, repliedReviews: 49 },
+  { day: '15 Nov', syncRate: 83.2, resolvedDiscrepancies: 196, incomingReviews: 48, repliedReviews: 45 },
+  { day: '16 Nov', syncRate: 84.6, resolvedDiscrepancies: 214, incomingReviews: 61, repliedReviews: 58 },
+];
 
 interface OverviewDashboardProps {
   onNavigateToRegion: (regionShort: string) => void;
