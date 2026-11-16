@@ -1,17 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-  AdvancedMarker,
-  InfoWindow,
-  Map as GoogleMap,
-  Pin,
-  useAdvancedMarkerRef,
-  useMap,
-  type MapCameraChangedEvent,
-} from '@vis.gl/react-google-maps';
-import { ExternalLink, Maximize2, Minus, Plus, RotateCcw, Star } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import L from 'leaflet';
+import { Maximize2, Minus, Plus, RotateCcw } from 'lucide-react';
 import type { BranchLocation } from '../types/ops';
 import { calculateDistanceMeters, isValidIndonesianCoords } from './CoordinateComparisonMap';
-import { StatusBadge } from './StatusBadge';
 
 interface IndonesiaBranchMapProps {
   branches: BranchLocation[];
@@ -19,108 +10,150 @@ interface IndonesiaBranchMapProps {
   onSelectBranch: (branchId: string) => void;
   activeRegionFilter: string;
   onSelectRegionFilter: (regionShort: string) => void;
-  mapsApiKey: string;
+  mapsApiKey?: string;
   livePlacePoint?: { lat: number; lng: number; label?: string } | null;
 }
 
-const INDONESIA_CENTER = { lat: -2.5489, lng: 118.0149 };
+const INDONESIA_CENTER: [number, number] = [-2.5489, 118.0149];
 
-function getPinColors(status: BranchLocation['syncStatus'], isSelected: boolean) {
+function escapeHtml(raw: string): string {
+  return (raw || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function getPinStyle(status: BranchLocation['syncStatus'], isSelected: boolean) {
   if (isSelected) {
-    return { background: '#00529C', borderColor: '#FFFFFF', glyphColor: '#F37021' };
+    return { background: '#00529C', inner: '#F37021', size: 34 };
   }
   switch (status) {
     case 'action_required':
-      return { background: '#dc2626', borderColor: '#ffffff', glyphColor: '#ffffff' };
+      return { background: '#dc2626', inner: '#ffffff', size: 26 };
     case 'discrepancy':
-      return { background: '#d97706', borderColor: '#ffffff', glyphColor: '#ffffff' };
+      return { background: '#d97706', inner: '#ffffff', size: 26 };
     case 'pending_review':
     case 'processing':
-      return { background: '#2563eb', borderColor: '#ffffff', glyphColor: '#ffffff' };
+      return { background: '#2563eb', inner: '#ffffff', size: 26 };
     default:
-      return { background: '#059669', borderColor: '#ffffff', glyphColor: '#ffffff' };
+      return { background: '#059669', inner: '#ffffff', size: 26 };
   }
 }
 
-interface BranchMarkerProps {
-  branch: BranchLocation;
-  isSelected: boolean;
-  infoOpen: boolean;
-  onSelect: () => void;
-  onCloseInfo: () => void;
+function getStatusMeta(status: BranchLocation['syncStatus']): {
+  label: string;
+  bg: string;
+  color: string;
+  border: string;
+} {
+  switch (status) {
+    case 'synced':
+      return {
+        label: 'Tersinkronisasi',
+        bg: '#ecfdf5',
+        color: '#059669',
+        border: '#a7f3d0',
+      };
+    case 'discrepancy':
+      return {
+        label: 'Perbedaan Data',
+        bg: '#fffbeb',
+        color: '#b45309',
+        border: '#fde68a',
+      };
+    case 'action_required':
+      return {
+        label: 'Perlu Tindakan',
+        bg: '#fef2f2',
+        color: '#dc2626',
+        border: '#fecaca',
+      };
+    case 'pending_review':
+      return {
+        label: 'Review Google',
+        bg: '#eff6ff',
+        color: '#1d4ed8',
+        border: '#bfdbfe',
+      };
+    case 'processing':
+      return {
+        label: 'Menyinkronkan',
+        bg: '#eff6ff',
+        color: '#1d4ed8',
+        border: '#bfdbfe',
+      };
+  }
 }
 
-function BranchMarker({
-  branch,
-  isSelected,
-  infoOpen,
-  onSelect,
-  onCloseInfo,
-}: BranchMarkerProps) {
-  const [markerRef, marker] = useAdvancedMarkerRef();
-  const colors = getPinColors(branch.syncStatus, isSelected);
+function createPinDivIcon(status: BranchLocation['syncStatus'], isSelected: boolean): L.DivIcon {
+  const { background, inner, size } = getPinStyle(status, isSelected);
+  const height = Math.round(size * 1.25);
+  const ring = isSelected
+    ? `<circle cx="14" cy="14" r="12.5" stroke="#00529C" stroke-opacity="0.28" stroke-width="2" fill="none"/>`
+    : '';
+  const svg = `<svg width="${size}" height="${height}" viewBox="0 0 28 36" fill="none" xmlns="http://www.w3.org/2000/svg" style="filter:drop-shadow(0 3px 6px rgba(15,23,42,0.28));">
+    ${ring}
+    <path d="M14 2C7.37 2 2 7.37 2 14c0 9.1 12 19.5 12 19.5S26 23.1 26 14C26 7.37 20.63 2 14 2z" fill="${background}" stroke="#ffffff" stroke-width="2.2"/>
+    <circle cx="14" cy="14" r="4.6" fill="${inner}"/>
+  </svg>`;
+
+  return L.divIcon({
+    html: svg,
+    className: 'bri-div-icon',
+    iconSize: [size, height],
+    iconAnchor: [Math.round(size / 2), Math.round(height * 0.94)],
+    popupAnchor: [0, -Math.round(height * 0.85)],
+  });
+}
+
+function buildBranchPopupHtml(branch: BranchLocation): string {
+  const statusMeta = getStatusMeta(branch.syncStatus);
   const mapsSearchUrl =
     branch.googleMapsUri ||
     `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
       `BRI ${branch.name} ${branch.city}`
     )}`;
+  const satLine =
+    branch.saturdayHours && branch.saturdayHours !== 'Tutup'
+      ? `<div>Sabtu: ${escapeHtml(branch.saturdayHours)}</div>`
+      : '';
 
-  return (
-    <>
-      <AdvancedMarker
-        ref={markerRef}
-        position={{ lat: branch.lat, lng: branch.lng }}
-        title={`${branch.name} (${branch.code})`}
-        zIndex={isSelected ? 50 : 10}
-        onClick={onSelect}
+  return `
+    <div style="font-family:var(--font-sans);color:#1a1b22;line-height:1.4;">
+      <div style="font-family:var(--font-mono);font-size:11px;color:#64748b;margin-bottom:2px;">
+        ${escapeHtml(branch.code)} &middot; ${escapeHtml(branch.tierLabel)}
+      </div>
+      <div style="font-family:var(--font-display);font-size:13.5px;font-weight:700;color:#1a1b22;margin-bottom:6px;">
+        ${escapeHtml(branch.name)}
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;">
+        <span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:600;background:${statusMeta.bg};color:${statusMeta.color};border:1px solid ${statusMeta.border};">
+          ${escapeHtml(statusMeta.label)}
+        </span>
+        <span style="font-family:var(--font-mono);font-size:11.5px;font-weight:600;color:#444653;white-space:nowrap;">
+          <span style="color:#d97706;">&#9733;</span> ${branch.rating.toFixed(1)} (${branch.reviewCount})
+        </span>
+      </div>
+      <div style="font-size:11.5px;color:#444653;margin-bottom:6px;">
+        ${escapeHtml(branch.address)}
+      </div>
+      <div style="font-family:var(--font-mono);font-size:11px;color:#00529C;margin-bottom:8px;">
+        <div>Sen–Jum: ${escapeHtml(branch.operatingHours)}</div>
+        ${satLine}
+      </div>
+      <a
+        href="${escapeHtml(mapsSearchUrl)}"
+        target="_blank"
+        rel="noopener noreferrer"
+        style="display:inline-flex;align-items:center;gap:5px;padding:6px 10px;border-radius:10px;background:#00529C;color:#ffffff;font-size:11.5px;font-weight:600;text-decoration:none;"
       >
-        <Pin
-          background={colors.background}
-          borderColor={colors.borderColor}
-          glyphColor={colors.glyphColor}
-          scale={isSelected ? 1.25 : 0.95}
-        />
-      </AdvancedMarker>
-
-      {infoOpen && marker && (
-        <InfoWindow anchor={marker} onCloseClick={onCloseInfo} maxWidth={290}>
-          <div className="p-1 space-y-2 text-[#1a1b22] font-sans">
-            <div>
-              <p className="font-mono text-[11px] text-[#64748b]">
-                {branch.code} · {branch.tierLabel}
-              </p>
-              <p className="font-display text-sm font-bold text-[#1a1b22] leading-snug">
-                {branch.name}
-              </p>
-            </div>
-
-            <div className="flex items-center justify-between gap-2">
-              <StatusBadge status={branch.syncStatus} compact />
-              <span className="inline-flex items-center gap-1 font-mono text-xs text-[#444653]">
-                <Star className="h-3.5 w-3.5 text-[#d97706] fill-[#d97706]" />
-                {branch.rating.toFixed(1)}
-              </span>
-            </div>
-
-            <p className="text-xs text-[#444653] leading-relaxed">{branch.address}</p>
-            <p className="font-mono text-[11px] text-[#00529C]">
-              Sen–Jum: {branch.operatingHours}
-            </p>
-
-            <a
-              href={mapsSearchUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#00529C] hover:underline pt-0.5"
-            >
-              <span>Buka di Google Maps</span>
-              <ExternalLink className="h-3 w-3" />
-            </a>
-          </div>
-        </InfoWindow>
-      )}
-    </>
-  );
+        <span>Buka di Google Maps</span>
+        <span aria-hidden="true">&#8599;</span>
+      </a>
+    </div>
+  `;
 }
 
 interface RegionClusterItem {
@@ -132,50 +165,29 @@ interface RegionClusterItem {
   representativeId: string;
 }
 
-function MapViewportSync({
-  selectedBranch,
-  activeRegionFilter,
-  resetSignal,
-}: {
-  selectedBranch: BranchLocation | null;
-  activeRegionFilter: string;
-  resetSignal: number;
-}) {
-  const map = useMap();
-
-  useEffect(() => {
-    if (!map || !selectedBranch) return;
-    if (!isValidIndonesianCoords(selectedBranch.lat, selectedBranch.lng)) return;
-    map.panTo({ lat: selectedBranch.lat, lng: selectedBranch.lng });
-    const currentZoom = map.getZoom() ?? 5;
-    if (currentZoom < 12) {
-      map.setZoom(13);
-    }
-  }, [map, selectedBranch?.id]);
-
-  useEffect(() => {
-    if (!map) return;
-    if (resetSignal > 0 && activeRegionFilter === 'ALL') {
-      map.panTo(INDONESIA_CENTER);
-      map.setZoom(5);
-    }
-  }, [map, resetSignal, activeRegionFilter]);
-
-  return null;
-}
-
-function IndonesiaBranchMapWithApi({
+export function IndonesiaBranchMap({
   branches,
   selectedBranchId,
   onSelectBranch,
   activeRegionFilter,
   onSelectRegionFilter,
   livePlacePoint,
-}: Omit<IndonesiaBranchMapProps, 'mapsApiKey'>) {
-  const map = useMap();
+}: IndonesiaBranchMapProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<L.Map | null>(null);
+  const layerGroupRef = useRef<L.LayerGroup | null>(null);
+  const tileLayerRef = useRef<L.TileLayer | null>(null);
+  const markersByIdRef = useRef<Map<string, L.Marker>>(new Map());
+  const prevSelectedIdRef = useRef<string | null>(null);
+
   const [zoom, setZoom] = useState(5);
-  const [infoOpenBranchId, setInfoOpenBranchId] = useState<string | null>(null);
-  const [resetSignal, setResetSignal] = useState(0);
+  const [viewportTick, setViewportTick] = useState(0);
+
+  // Keep latest callbacks in refs so Leaflet listeners never capture stale closures
+  const onSelectBranchRef = useRef(onSelectBranch);
+  const onSelectRegionFilterRef = useRef(onSelectRegionFilter);
+  onSelectBranchRef.current = onSelectBranch;
+  onSelectRegionFilterRef.current = onSelectRegionFilter;
 
   const selectedBranch = useMemo(
     () => branches.find((b) => b.id === selectedBranchId) ?? null,
@@ -240,7 +252,19 @@ function IndonesiaBranchMapWithApi({
 
   const visiblePins = useMemo(() => {
     if (showClusters) return [];
-    const prioritized = [...validBranches].sort((a, b) => {
+    const map = mapRef.current;
+    const bounds = map ? map.getBounds().pad(0.25) : null;
+
+    const inBoundsOrSmall =
+      bounds && validBranches.length > 180
+        ? validBranches.filter(
+            (b) => b.id === selectedBranchId || bounds.contains([b.lat, b.lng])
+          )
+        : validBranches;
+
+    const candidatePool = inBoundsOrSmall.length > 0 ? inBoundsOrSmall : validBranches;
+
+    const prioritized = [...candidatePool].sort((a, b) => {
       if (a.id === selectedBranchId) return -1;
       if (b.id === selectedBranchId) return 1;
       const score = (s: BranchLocation['syncStatus']) =>
@@ -255,61 +279,233 @@ function IndonesiaBranchMapWithApi({
                 : 4;
       return score(a.syncStatus) - score(b.syncStatus);
     });
-    return prioritized.slice(0, 90);
-  }, [validBranches, selectedBranchId, showClusters]);
+
+    return prioritized.slice(0, 180);
+  }, [validBranches, selectedBranchId, showClusters, viewportTick]);
 
   const gbpPinPoint = useMemo(() => {
     if (!selectedBranch) return null;
     const coordDisc = selectedBranch.discrepancies.find((d) => d.field === 'coordinates');
     const lat = livePlacePoint?.lat ?? selectedBranch.gbpLat ?? coordDisc?.gbpLat;
     const lng = livePlacePoint?.lng ?? selectedBranch.gbpLng ?? coordDisc?.gbpLng;
-    if (typeof lat !== 'number' || typeof lng !== 'number' || !isValidIndonesianCoords(lat, lng)) {
+    if (
+      typeof lat !== 'number' ||
+      typeof lng !== 'number' ||
+      !isValidIndonesianCoords(lat, lng)
+    ) {
       return null;
     }
     if (isValidIndonesianCoords(selectedBranch.lat, selectedBranch.lng)) {
       const dist = calculateDistanceMeters(selectedBranch.lat, selectedBranch.lng, lat, lng);
       if (dist <= 10) return null;
     }
-    return { lat, lng, label: livePlacePoint?.label || `Lokasi Asli Google Maps (${selectedBranch.name})` };
+    return {
+      lat,
+      lng,
+      label: livePlacePoint?.label || `Titik Pembanding Maps (${selectedBranch.name})`,
+    };
   }, [selectedBranch, livePlacePoint]);
 
-  const handleCameraChanged = useCallback((ev: MapCameraChangedEvent) => {
-    if (typeof ev.detail.zoom === 'number') {
-      setZoom(ev.detail.zoom);
-    }
+  // Initialize Leaflet Map
+  useEffect(() => {
+    if (!containerRef.current || mapRef.current) return;
+
+    const hasInitialBranch =
+      selectedBranch && isValidIndonesianCoords(selectedBranch.lat, selectedBranch.lng);
+
+    const map = L.map(containerRef.current, {
+      center: hasInitialBranch
+        ? [selectedBranch.lat, selectedBranch.lng]
+        : INDONESIA_CENTER,
+      zoom: hasInitialBranch ? 12 : 5,
+      minZoom: 4,
+      maxZoom: 19,
+      zoomControl: false,
+      attributionControl: true,
+    });
+
+    const layerGroup = L.layerGroup().addTo(map);
+    mapRef.current = map;
+    layerGroupRef.current = layerGroup;
+
+    map.on('zoomend moveend', () => {
+      setZoom(map.getZoom());
+      setViewportTick((t) => t + 1);
+    });
+
+    const ro = new ResizeObserver(() => {
+      map.invalidateSize();
+    });
+    ro.observe(containerRef.current);
+
+    window.setTimeout(() => {
+      map.invalidateSize();
+    }, 120);
+
+    return () => {
+      ro.disconnect();
+      map.remove();
+      mapRef.current = null;
+      layerGroupRef.current = null;
+      tileLayerRef.current = null;
+      markersByIdRef.current.clear();
+    };
   }, []);
 
-  const handleZoomIn = () => {
+  // Manage base tile layer (100% free OpenStreetMap without API Key)
+  useEffect(() => {
+    const map = mapRef.current;
     if (!map) return;
-    map.setZoom(Math.min(18, (map.getZoom() ?? 5) + 2));
-  };
 
-  const handleZoomOut = () => {
-    if (!map) return;
-    map.setZoom(Math.max(4, (map.getZoom() ?? 5) - 2));
-  };
-
-  const handleResetView = () => {
-    onSelectRegionFilter('ALL');
-    setInfoOpenBranchId(null);
-    setResetSignal((n) => n + 1);
-    if (map) {
-      map.panTo(INDONESIA_CENTER);
-      map.setZoom(5);
+    if (tileLayerRef.current && map.hasLayer(tileLayerRef.current)) {
+      map.removeLayer(tileLayerRef.current);
     }
-  };
+
+    const layer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      maxZoom: 19,
+    });
+
+    layer.addTo(map);
+    tileLayerRef.current = layer;
+  }, []);
+
+  // Pan/zoom smoothly when selectedBranchId changes from outside (table/list click)
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !selectedBranch) return;
+    if (prevSelectedIdRef.current === selectedBranch.id) return;
+    prevSelectedIdRef.current = selectedBranch.id;
+
+    if (!isValidIndonesianCoords(selectedBranch.lat, selectedBranch.lng)) return;
+    const targetZoom = Math.max(map.getZoom(), 13);
+    map.setView([selectedBranch.lat, selectedBranch.lng], targetZoom, { animate: true });
+  }, [selectedBranch]);
+
+  // Render clusters or branch markers + GBP discrepancy pin
+  useEffect(() => {
+    const map = mapRef.current;
+    const layerGroup = layerGroupRef.current;
+    if (!map || !layerGroup) return;
+
+    layerGroup.clearLayers();
+    markersByIdRef.current.clear();
+
+    if (showClusters) {
+      for (const cluster of clusters) {
+        const shortName = escapeHtml(cluster.regionShort.replace('RO ', ''));
+        const badgeHtml = `
+          <div style="display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:9999px;background:#00529C;color:#ffffff;border:2px solid #ffffff;box-shadow:0 4px 12px rgba(15,23,42,0.26);cursor:pointer;white-space:nowrap;">
+            <span style="font-family:var(--font-mono);font-size:11px;font-weight:700;">${cluster.count}</span>
+            <span style="font-size:10.5px;font-weight:600;">${shortName}</span>
+          </div>
+        `;
+        const icon = L.divIcon({
+          html: badgeHtml,
+          className: 'bri-div-icon',
+          iconSize: [110, 30],
+          iconAnchor: [55, 15],
+        });
+
+        const clusterMarker = L.marker([cluster.lat, cluster.lng], {
+          icon,
+          title: `${cluster.regionShort}: ${cluster.count} unit BRI`,
+        });
+
+        clusterMarker.on('click', () => {
+          onSelectRegionFilterRef.current(cluster.regionShort);
+          onSelectBranchRef.current(cluster.representativeId);
+          map.setView([cluster.lat, cluster.lng], 9, { animate: true });
+        });
+
+        clusterMarker.addTo(layerGroup);
+      }
+      return;
+    }
+
+    for (const b of visiblePins) {
+      const isSelected = b.id === selectedBranchId;
+      const marker = L.marker([b.lat, b.lng], {
+        icon: createPinDivIcon(b.syncStatus, isSelected),
+        title: `${b.name} (${b.code})`,
+        zIndexOffset: isSelected ? 500 : 100,
+      });
+
+      marker.bindPopup(buildBranchPopupHtml(b), {
+        className: 'bri-leaflet-popup',
+        maxWidth: 280,
+        autoPan: true,
+      });
+
+      marker.on('click', () => {
+        prevSelectedIdRef.current = b.id;
+        onSelectBranchRef.current(b.id);
+      });
+
+      marker.addTo(layerGroup);
+      markersByIdRef.current.set(b.id, marker);
+    }
+
+    if (gbpPinPoint && selectedBranch && isValidIndonesianCoords(selectedBranch.lat, selectedBranch.lng)) {
+      const gbpMarker = L.marker([gbpPinPoint.lat, gbpPinPoint.lng], {
+        icon: createPinDivIcon('action_required', false),
+        title: gbpPinPoint.label,
+        zIndexOffset: 600,
+      }).bindPopup(
+        `<div style="font-size:12px;line-height:1.4;">
+          <strong style="color:#dc2626;">Titik Pembanding Maps</strong><br/>
+          <span>${escapeHtml(gbpPinPoint.label)}</span><br/>
+          <code style="font-size:11px;color:#444653;">${gbpPinPoint.lat.toFixed(5)}, ${gbpPinPoint.lng.toFixed(5)}</code>
+        </div>`,
+        { className: 'bri-leaflet-popup' }
+      );
+      gbpMarker.addTo(layerGroup);
+
+      L.polyline(
+        [
+          [selectedBranch.lat, selectedBranch.lng],
+          [gbpPinPoint.lat, gbpPinPoint.lng],
+        ],
+        {
+          color: '#dc2626',
+          weight: 2.5,
+          opacity: 0.8,
+          dashArray: '6, 5',
+        }
+      ).addTo(layerGroup);
+    }
+  }, [showClusters, clusters, visiblePins, selectedBranchId, gbpPinPoint, selectedBranch]);
+
+  const handleZoomIn = useCallback(() => {
+    const map = mapRef.current;
+    if (map) map.setZoom(Math.min(19, map.getZoom() + 2));
+  }, []);
+
+  const handleZoomOut = useCallback(() => {
+    const map = mapRef.current;
+    if (map) map.setZoom(Math.max(4, map.getZoom() - 2));
+  }, []);
+
+  const handleResetView = useCallback(() => {
+    onSelectRegionFilter('ALL');
+    const map = mapRef.current;
+    if (map) {
+      map.closePopup();
+      map.setView(INDONESIA_CENTER, 5, { animate: true });
+    }
+  }, [onSelectRegionFilter]);
 
   return (
     <div className="rounded-3xl bg-white border border-[#e2e8f0] p-5 shadow-[0_4px_20px_-2px_rgba(15,23,42,0.05)] space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h3 className="font-display text-base font-semibold text-[#1a1b22]">
-            Peta Google Maps Jaringan BRI
+            Peta Sebaran Lokasi &amp; Profil GBP BRI
           </h3>
           <p className="text-xs text-[#64748b]">
             {showClusters
-              ? 'Klik klaster wilayah atau perbesar peta untuk melihat pin cabang riil'
-              : `Menampilkan ${visiblePins.length.toLocaleString('id-ID')} titik unit BRI di Google Maps`}
+              ? 'Klik klaster wilayah atau perbesar peta untuk melihat pin unit kerja BRI'
+              : `Menampilkan ${visiblePins.length.toLocaleString('id-ID')} titik unit BRI (klik pin untuk detail GBP)`}
           </p>
         </div>
 
@@ -351,90 +547,9 @@ function IndonesiaBranchMapWithApi({
         </div>
       </div>
 
-      {/* Explicit sized container for Google Maps (prevents 0x0 collapse) */}
-      <div className="relative h-[340px] sm:h-[380px] w-full rounded-2xl bg-[#f4f2fc] border border-[#e2e8f0] overflow-hidden">
-        <GoogleMap
-          mapId="DEMO_MAP_ID"
-          internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
-          defaultCenter={
-            selectedBranch && isValidIndonesianCoords(selectedBranch.lat, selectedBranch.lng)
-              ? { lat: selectedBranch.lat, lng: selectedBranch.lng }
-              : INDONESIA_CENTER
-          }
-          defaultZoom={
-            selectedBranch && isValidIndonesianCoords(selectedBranch.lat, selectedBranch.lng)
-              ? 12
-              : 5
-          }
-          gestureHandling="greedy"
-          mapTypeControl={false}
-          streetViewControl={false}
-          onCameraChanged={handleCameraChanged}
-          onClick={() => setInfoOpenBranchId(null)}
-          style={{ width: '100%', height: '100%' }}
-        >
-          <MapViewportSync
-            selectedBranch={selectedBranch}
-            activeRegionFilter={activeRegionFilter}
-            resetSignal={resetSignal}
-          />
-
-          {showClusters &&
-            clusters.map((cluster) => (
-              <AdvancedMarker
-                key={cluster.regionShort}
-                position={{ lat: cluster.lat, lng: cluster.lng }}
-                title={`${cluster.regionShort}: ${cluster.count} unit BRI`}
-                onClick={() => {
-                  onSelectRegionFilter(cluster.regionShort);
-                  onSelectBranch(cluster.representativeId);
-                  if (map) {
-                    map.panTo({ lat: cluster.lat, lng: cluster.lng });
-                    map.setZoom(9);
-                  }
-                }}
-              >
-                <div className="px-2.5 py-1.5 rounded-full bg-[#00529C] text-white border-2 border-white shadow-md flex items-center gap-1.5 cursor-pointer hover:bg-[#004080] smooth-transition">
-                  <span className="font-mono text-[11px] font-bold tabular-nums">
-                    {cluster.count}
-                  </span>
-                  <span className="text-[10px] font-medium whitespace-nowrap">
-                    {cluster.regionShort.replace('RO ', '')}
-                  </span>
-                </div>
-              </AdvancedMarker>
-            ))}
-
-          {!showClusters &&
-            visiblePins.map((b) => (
-              <BranchMarker
-                key={b.id}
-                branch={b}
-                isSelected={b.id === selectedBranchId}
-                infoOpen={b.id === infoOpenBranchId}
-                onSelect={() => {
-                  onSelectBranch(b.id);
-                  setInfoOpenBranchId(b.id);
-                }}
-                onCloseInfo={() => setInfoOpenBranchId(null)}
-              />
-            ))}
-
-          {gbpPinPoint && (
-            <AdvancedMarker
-              position={{ lat: gbpPinPoint.lat, lng: gbpPinPoint.lng }}
-              title={gbpPinPoint.label}
-              zIndex={60}
-            >
-              <Pin
-                background="#dc2626"
-                borderColor="#ffffff"
-                glyphColor="#fde047"
-                scale={1.15}
-              />
-            </AdvancedMarker>
-          )}
-        </GoogleMap>
+      {/* Responsive Leaflet Map Container */}
+      <div className="relative h-[320px] sm:h-[380px] w-full rounded-2xl bg-[#eef2f6] border border-[#e2e8f0] overflow-hidden">
+        <div ref={containerRef} className="w-full h-full" />
       </div>
 
       {/* Semantic Legend */}
@@ -453,7 +568,7 @@ function IndonesiaBranchMapWithApi({
         </span>
         <span className="inline-flex items-center gap-1.5">
           <span className="h-2.5 w-2.5 rounded-full bg-[#dc2626]" />
-          Perlu Tindakan / Titik Asli Maps
+          Perlu Tindakan / Titik Pembanding
         </span>
         <span className="inline-flex items-center gap-1.5">
           <span className="h-2.5 w-2.5 rounded-full bg-[#00529C]" />
@@ -462,29 +577,4 @@ function IndonesiaBranchMapWithApi({
       </div>
     </div>
   );
-}
-
-export function IndonesiaBranchMap(props: IndonesiaBranchMapProps) {
-  if (!props.mapsApiKey) {
-    return (
-      <div className="rounded-3xl bg-white border border-[#e2e8f0] p-5 shadow-[0_4px_20px_-2px_rgba(15,23,42,0.05)] space-y-4">
-        <div>
-          <h3 className="font-display text-base font-semibold text-[#1a1b22]">
-            Peta Google Maps Jaringan BRI
-          </h3>
-          <p className="text-xs text-[#64748b]">Menyiapkan koneksi Google Maps Platform...</p>
-        </div>
-        <div className="h-[340px] sm:h-[380px] w-full rounded-2xl bg-[#f4f2fc] border border-[#e2e8f0] flex flex-col items-center justify-center p-6 text-center space-y-2">
-          <p className="font-display text-sm font-semibold text-[#1a1b22]">
-            Menyiapkan Koneksi Google Maps Platform
-          </p>
-          <p className="text-xs text-[#64748b] max-w-sm">
-            Kunci API Google Maps sedang dimuat. Pastikan konfigurasi Maps aktif di lingkungan aplikasi.
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  return <IndonesiaBranchMapWithApi {...props} />;
 }

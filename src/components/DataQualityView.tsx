@@ -5,6 +5,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Compass,
+  ExternalLink,
   FileSpreadsheet,
   Globe,
   Loader2,
@@ -142,7 +143,7 @@ export function DataQualityView() {
     setFixLat(String(b.lat));
     setFixLng(String(b.lng));
     setSingleSubmitToGoogle(true);
-    if (mapsApiKey && !(b.id in livePlacesCache)) {
+    if (!(b.id in livePlacesCache)) {
       fetchLiveGooglePlace(b);
     }
   };
@@ -151,7 +152,7 @@ export function DataQualityView() {
     const b = branchMap.get(branchId);
     if (!b) return;
     setMapCompareBranch(b);
-    if (mapsApiKey && (forceLiveCheck || !(b.id in livePlacesCache))) {
+    if (forceLiveCheck || !(b.id in livePlacesCache)) {
       fetchLiveGooglePlace(b, forceLiveCheck);
     }
   };
@@ -786,26 +787,42 @@ export function DataQualityView() {
                 heightClass="h-[290px]"
               />
 
-              <div className="flex items-center justify-end gap-2.5">
-                <button
-                  type="button"
-                  onClick={() => setMapCompareBranch(null)}
-                  className="h-10 px-4 rounded-2xl bg-white border border-[#cbd5e1] text-xs font-medium text-[#1a1b22]"
+              <div className="flex flex-wrap items-center justify-between gap-2.5">
+                <a
+                  href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+                    isValidIndonesianCoords(compareModalBranchLive.lat, compareModalBranchLive.lng)
+                      ? `${compareModalBranchLive.lat},${compareModalBranchLive.lng}`
+                      : `BRI ${compareModalBranchLive.name} ${compareModalBranchLive.city}`
+                  )}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="h-10 px-4 rounded-2xl bg-[#eff6ff] hover:bg-[#dbeafe] text-xs font-semibold text-[#00529C] inline-flex items-center gap-1.5 whitespace-nowrap"
                 >
-                  Tutup
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const id = compareModalBranchLive.id;
-                    setMapCompareBranch(null);
-                    openSingleEditor(id);
-                  }}
-                  className="h-10 px-5 rounded-2xl bg-[#00529C] hover:bg-[#004080] text-white text-xs font-semibold inline-flex items-center gap-2"
-                >
-                  <Wrench className="h-3.5 w-3.5" />
-                  <span>Perbaiki &amp; Sinkronkan Lokasi Ini</span>
-                </button>
+                  <span>Buka di Google Maps</span>
+                  <ExternalLink className="h-3.5 w-3.5" />
+                </a>
+
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setMapCompareBranch(null)}
+                    className="h-10 px-4 rounded-2xl bg-white border border-[#cbd5e1] text-xs font-medium text-[#1a1b22]"
+                  >
+                    Tutup
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const id = compareModalBranchLive.id;
+                      setMapCompareBranch(null);
+                      openSingleEditor(id);
+                    }}
+                    className="h-10 px-5 rounded-2xl bg-[#00529C] hover:bg-[#004080] text-white text-xs font-semibold inline-flex items-center gap-2"
+                  >
+                    <Wrench className="h-3.5 w-3.5" />
+                    <span>Perbaiki &amp; Sinkronkan Lokasi Ini</span>
+                  </button>
+                </div>
               </div>
             </div>
           </div>

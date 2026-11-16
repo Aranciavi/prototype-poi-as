@@ -179,12 +179,12 @@ export function DirectoryWorkspace({ initialRegionFilter = 'ALL' }: DirectoryWor
     }
   }, [selectedBranch?.id]);
 
-  // Automatically look up real Google Maps details when selecting a branch (once per branch)
+  // Automatically populate GBP / Google Maps profile preview when selecting a branch
   useEffect(() => {
-    if (selectedBranch && mapsApiKey && !(selectedBranch.id in livePlacesCache)) {
+    if (selectedBranch && !(selectedBranch.id in livePlacesCache)) {
       fetchLiveGooglePlace(selectedBranch);
     }
-  }, [selectedBranch?.id, mapsApiKey]);
+  }, [selectedBranch?.id]);
 
   const livePlace = selectedBranch ? livePlacesCache[selectedBranch.id] : undefined;
   const isLoadingPlace = selectedBranch ? Boolean(loadingPlaceIds[selectedBranch.id]) : false;
@@ -738,22 +738,41 @@ export function DirectoryWorkspace({ initialRegionFilter = 'ALL' }: DirectoryWor
                 </div>
                 <div className="flex flex-col items-end gap-2 shrink-0">
                   <StatusBadge status={selectedBranch.syncStatus} />
-                  <button
-                    type="button"
-                    onClick={() => toggleBranchMarked(selectedBranch.id)}
-                    className={`h-8 px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 smooth-transition whitespace-nowrap ${
-                      markedSet.has(selectedBranch.id)
-                        ? 'bg-[#00529C] border-[#00529C] text-white'
-                        : 'bg-white border-[#cbd5e1] text-[#1a1b22] hover:bg-[#f1f5f9]'
-                    }`}
-                  >
-                    <Tag className="h-3.5 w-3.5" />
-                    <span>
-                      {markedSet.has(selectedBranch.id)
-                        ? 'Ditandai Ubah'
-                        : 'Tandai untuk Diubah'}
-                    </span>
-                  </button>
+                  <div className="flex flex-wrap items-center justify-end gap-1.5">
+                    <a
+                      href={
+                        livePlace?.googleMapsUri ||
+                        selectedBranch.googleMapsUri ||
+                        `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+                          isValidIndonesianCoords(selectedBranch.lat, selectedBranch.lng)
+                            ? `${selectedBranch.lat},${selectedBranch.lng}`
+                            : `BRI ${selectedBranch.name} ${selectedBranch.city}`
+                        )}`
+                      }
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="h-8 px-3 rounded-xl bg-[#eff6ff] border border-[#bfdbfe] hover:bg-[#dbeafe] text-xs font-semibold text-[#00529C] inline-flex items-center gap-1.5 smooth-transition whitespace-nowrap"
+                    >
+                      <span>Buka di Google Maps</span>
+                      <ExternalLink className="h-3.5 w-3.5" />
+                    </a>
+                    <button
+                      type="button"
+                      onClick={() => toggleBranchMarked(selectedBranch.id)}
+                      className={`h-8 px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 smooth-transition whitespace-nowrap ${
+                        markedSet.has(selectedBranch.id)
+                          ? 'bg-[#00529C] border-[#00529C] text-white'
+                          : 'bg-white border-[#cbd5e1] text-[#1a1b22] hover:bg-[#f1f5f9]'
+                      }`}
+                    >
+                      <Tag className="h-3.5 w-3.5" />
+                      <span>
+                        {markedSet.has(selectedBranch.id)
+                          ? 'Ditandai Ubah'
+                          : 'Tandai untuk Diubah'}
+                      </span>
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -784,13 +803,13 @@ export function DirectoryWorkspace({ initialRegionFilter = 'ALL' }: DirectoryWor
                 </div>
               )}
 
-              {/* Live Google Maps Data Panel */}
+              {/* Profil GBP & Google Maps Eksternal */}
               <div className="rounded-2xl bg-[#f8fafc] border border-[#e2e8f0] p-4 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <Globe className="h-4 w-4 text-[#00529C]" />
                     <span className="text-xs font-semibold text-[#1a1b22]">
-                      Data Riil Google Maps (Places API)
+                      Profil Google Business &amp; Tautan Peta
                     </span>
                   </div>
                   <button
@@ -800,26 +819,19 @@ export function DirectoryWorkspace({ initialRegionFilter = 'ALL' }: DirectoryWor
                     className="h-8 px-3 rounded-xl bg-white border border-[#cbd5e1] hover:bg-[#f1f5f9] text-xs font-semibold text-[#00529C] inline-flex items-center gap-1.5 smooth-transition disabled:opacity-50 whitespace-nowrap"
                   >
                     <RefreshCw className={`h-3 w-3 ${isLoadingPlace ? 'animate-spin' : ''}`} />
-                    <span>{isLoadingPlace ? 'Memuat...' : 'Segarkan Data Riil'}</span>
+                    <span>{isLoadingPlace ? 'Memuat...' : 'Segarkan Profil GBP'}</span>
                   </button>
                 </div>
 
                 {isLoadingPlace && !livePlace && (
                   <div className="flex items-center gap-2 text-xs text-[#64748b] py-2">
                     <Loader2 className="h-3.5 w-3.5 animate-spin text-[#00529C]" />
-                    <span>Mengambil profil Google Maps langsung untuk {selectedBranch.name}...</span>
+                    <span>Menyiapkan profil Google Business untuk {selectedBranch.name}...</span>
                   </div>
                 )}
 
                 {!isLoadingPlace && placeError && (
                   <p className="text-xs text-[#dc2626]">{placeError}</p>
-                )}
-
-                {!isLoadingPlace && livePlace === null && !placeError && (
-                  <p className="text-xs text-[#64748b]">
-                    Listing spesifik belum ditemukan otomatis di Google Maps. Anda tetap dapat
-                    memperbarui Master Data BRI di bawah.
-                  </p>
                 )}
 
                 {livePlace && (
@@ -837,26 +849,31 @@ export function DirectoryWorkspace({ initialRegionFilter = 'ALL' }: DirectoryWor
                     {livePlace.weekdayDescriptions && livePlace.weekdayDescriptions.length > 0 && (
                       <div className="rounded-xl bg-white border border-[#e2e8f0] p-2.5 space-y-1">
                         <p className="text-[11px] font-semibold text-[#64748b]">
-                          Jam Buka Live di Google Maps:
+                          Jadwal Operasional Profil:
                         </p>
                         <p className="font-mono text-[11px] text-[#1a1b22]">
-                          {livePlace.weekdayDescriptions[0]}
+                          {livePlace.weekdayDescriptions.slice(0, 2).join(' · ')}
                         </p>
                       </div>
                     )}
 
                     <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                      {livePlace.googleMapsUri && (
-                        <a
-                          href={livePlace.googleMapsUri}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 font-semibold text-[#00529C] hover:underline"
-                        >
-                          <span>Lihat di Google Maps</span>
-                          <ExternalLink className="h-3 w-3" />
-                        </a>
-                      )}
+                      <a
+                        href={
+                          livePlace.googleMapsUri ||
+                          `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+                            isValidIndonesianCoords(selectedBranch.lat, selectedBranch.lng)
+                              ? `${selectedBranch.lat},${selectedBranch.lng}`
+                              : `BRI ${selectedBranch.name} ${selectedBranch.city}`
+                          )}`
+                        }
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 font-semibold text-[#00529C] hover:underline"
+                      >
+                        <span>Buka di Google Maps</span>
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
 
                       {livePlace.reviews.length > 0 && (
                         <button

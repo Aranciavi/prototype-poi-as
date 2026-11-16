@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import { AlertCircle, CheckCircle2, Loader2, RefreshCw, Send, Sparkles, Star, X } from 'lucide-react';
 import { useGbpAuth } from '../context/GbpAuthContext';
 import { useOps } from '../context/OpsContext';
-import { buildLocalSuggestions, tryBackendJson } from '../services/localEngine';
+import { buildLocalSuggestions } from '../services/localEngine';
 import type { ReviewSuggestion } from '../types/ops';
 
 export function ReviewReplyDrawer() {
@@ -19,41 +19,11 @@ export function ReviewReplyDrawer() {
   const [confirmingPublish, setConfirmingPublish] = useState(false);
   const [isSending, setIsSending] = useState(false);
 
-  const generateSuggestions = useCallback(async () => {
+  const generateSuggestions = useCallback(() => {
     if (!activeReview) return;
     setIsGenerating(true);
     setAiError(null);
     try {
-      const result = await tryBackendJson<{
-        suggestions?: ReviewSuggestion[];
-        error?: string;
-      }>('/api/reviews/suggest', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          branchName: activeReview.branchName,
-          branchCode: activeReview.branchCode,
-          authorName: activeReview.authorName,
-          rating: activeReview.rating,
-          comment: activeReview.comment,
-        }),
-      });
-
-      if (result.available && result.ok && Array.isArray(result.data?.suggestions)) {
-        setSuggestions(result.data.suggestions);
-        return;
-      }
-
-      // Fallback client-side suggestions (for Vercel static site or when Gemini API key is not configured)
-      setSuggestions(
-        buildLocalSuggestions({
-          branchName: activeReview.branchName,
-          authorName: activeReview.authorName,
-          rating: activeReview.rating,
-          comment: activeReview.comment,
-        })
-      );
-    } catch {
       setSuggestions(
         buildLocalSuggestions({
           branchName: activeReview.branchName,

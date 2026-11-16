@@ -9,7 +9,6 @@ import {
   type User,
 } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
-import { tryBackendJson } from '../services/localEngine';
 import type { GbpAccount, GbpLocationSummary } from '../types/ops';
 
 const firebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
@@ -65,26 +64,6 @@ export function GbpAuthProvider({ children }: { children: React.ReactNode }) {
       if (!accountName || !token) return;
       setIsLoadingGbpData(true);
       try {
-        const result = await tryBackendJson<{
-          locations?: GbpLocationSummary[];
-          error?: string;
-        }>(`/api/gbp/locations?accountName=${encodeURIComponent(accountName)}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-
-        if (result.available) {
-          if (!result.ok) {
-            setGbpError(
-              result.data?.error || 'Gagal memuat daftar lokasi dari Google Business Profile.'
-            );
-            setGbpLocations([]);
-            return;
-          }
-          setGbpLocations(Array.isArray(result.data?.locations) ? result.data.locations : []);
-          return;
-        }
-
-        // Direct browser call fallback for static Vercel deployment
         const directRes = await fetch(
           `https://mybusinessbusinessinformation.googleapis.com/v1/${accountName}/locations?readMask=name,title,storeCode,phoneNumbers,websiteUri,storefrontAddress,latlng,metadata&pageSize=100`,
           {
@@ -120,49 +99,26 @@ export function GbpAuthProvider({ children }: { children: React.ReactNode }) {
       setIsLoadingGbpData(true);
       setGbpError(null);
       try {
-        const result = await tryBackendJson<{
+        const directRes = await fetch(
+          'https://mybusinessaccountmanagement.googleapis.com/v1/accounts',
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+        const directData = (await directRes.json()) as {
           accounts?: GbpAccount[];
-          error?: string;
-          hint?: string;
-        }>('/api/gbp/accounts', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-
-        let accList: GbpAccount[] = [];
-        if (result.available) {
-          if (!result.ok) {
-            setGbpError(
-              result.data?.error ||
-                'Akun Google terautentikasi, namun akses Google Business Profile API belum aktif pada proyek Google Cloud ini.'
-            );
-            setAccounts([]);
-            setGbpLocations([]);
-            return;
-          }
-          accList = Array.isArray(result.data?.accounts) ? result.data.accounts : [];
-        } else {
-          // Direct browser call fallback for static Vercel deployment
-          const directRes = await fetch(
-            'https://mybusinessaccountmanagement.googleapis.com/v1/accounts',
-            {
-              headers: { Authorization: `Bearer ${token}` },
-            }
+          error?: { message?: string };
+        };
+        if (!directRes.ok) {
+          setGbpError(
+            directData.error?.message ||
+              'Akun Google terautentikasi, namun akses Google Business Profile API belum aktif pada proyek Google Cloud ini.'
           );
-          const directData = (await directRes.json()) as {
-            accounts?: GbpAccount[];
-            error?: { message?: string };
-          };
-          if (!directRes.ok) {
-            setGbpError(
-              directData.error?.message ||
-                'Akun Google terautentikasi, namun akses Google Business Profile API belum aktif pada proyek Google Cloud ini.'
-            );
-            setAccounts([]);
-            setGbpLocations([]);
-            return;
-          }
-          accList = Array.isArray(directData.accounts) ? directData.accounts : [];
+          setAccounts([]);
+          setGbpLocations([]);
+          return;
         }
+        const accList = Array.isArray(directData.accounts) ? directData.accounts : [];
 
         setAccounts(accList);
         if (accList.length > 0) {

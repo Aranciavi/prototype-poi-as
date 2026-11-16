@@ -1,12 +1,6 @@
-import { useEffect, useMemo } from 'react';
-import {
-  AdvancedMarker,
-  Map as GoogleMap,
-  Pin,
-  useMap,
-  useMapsLibrary,
-} from '@vis.gl/react-google-maps';
-import { Compass, MapPin } from 'lucide-react';
+import { useEffect, useMemo, useRef } from 'react';
+import L from 'leaflet';
+import { Compass, ExternalLink, MapPin } from 'lucide-react';
 import type { BranchLocation } from '../types/ops';
 
 export function calculateDistanceMeters(
@@ -50,51 +44,27 @@ export function isValidIndonesianCoords(lat: number, lng: number): boolean {
   );
 }
 
-interface DiscrepancyPolylineProps {
-  masterPoint: { lat: number; lng: number } | null;
-  googlePoint: { lat: number; lng: number } | null;
+function escapeHtml(raw: string): string {
+  return raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
 }
 
-function DiscrepancyMapOverlay({ masterPoint, googlePoint }: DiscrepancyPolylineProps) {
-  const map = useMap();
-  const coreLib = useMapsLibrary('core');
-  const mapsLib = useMapsLibrary('maps');
-
-  useEffect(() => {
-    if (!map) return;
-
-    if (masterPoint && googlePoint && coreLib) {
-      const bounds = new coreLib.LatLngBounds();
-      bounds.extend(masterPoint);
-      bounds.extend(googlePoint);
-      map.fitBounds(bounds, { top: 44, right: 44, bottom: 44, left: 44 });
-    } else if (googlePoint) {
-      map.panTo(googlePoint);
-      map.setZoom(16);
-    } else if (masterPoint) {
-      map.panTo(masterPoint);
-      map.setZoom(16);
-    }
-  }, [map, coreLib, masterPoint, googlePoint]);
-
-  useEffect(() => {
-    if (!map || !mapsLib || !masterPoint || !googlePoint) return;
-
-    const polyline = new mapsLib.Polyline({
-      path: [masterPoint, googlePoint],
-      geodesic: true,
-      strokeColor: '#dc2626',
-      strokeOpacity: 0.85,
-      strokeWeight: 3,
-      map,
-    });
-
-    return () => {
-      polyline.setMap(null);
-    };
-  }, [map, mapsLib, masterPoint, googlePoint]);
-
-  return null;
+function createPinIcon(fill: string, innerFill: string, size = 30): L.DivIcon {
+  const svg = `<svg width="${size}" height="${Math.round(size * 1.25)}" viewBox="0 0 28 36" fill="none" xmlns="http://www.w3.org/2000/svg" style="filter:drop-shadow(0 3px 6px rgba(15,23,42,0.3));">
+    <path d="M14 1C6.82 1 1 6.82 1 14c0 9.75 13 21 13 21s13-11.25 13-21C27 6.82 21.18 1 14 1z" fill="${fill}" stroke="#ffffff" stroke-width="2.2"/>
+    <circle cx="14" cy="14" r="5" fill="${innerFill}"/>
+  </svg>`;
+  return L.divIcon({
+    html: svg,
+    className: 'bri-div-icon',
+    iconSize: [size, Math.round(size * 1.25)],
+    iconAnchor: [Math.round(size / 2), Math.round(size * 1.2)],
+    popupAnchor: [0, -Math.round(size * 1.05)],
+  });
 }
 
 interface CoordinateComparisonMapProps {
@@ -102,7 +72,7 @@ interface CoordinateComparisonMapProps {
   liveLat?: number;
   liveLng?: number;
   liveLabel?: string;
-  mapsApiKey: string;
+  mapsApiKey?: string;
   heightClass?: string;
 }
 
@@ -111,9 +81,12 @@ export function CoordinateComparisonMap({
   liveLat,
   liveLng,
   liveLabel,
-  mapsApiKey,
   heightClass = 'h-[230px]',
 }: CoordinateComparisonMapProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<L.Map | null>(null);
+  const layerGroupRef = useRef<L.LayerGroup | null>(null);
+
   const coordDisc = branch.discrepancies.find((d) => d.field === 'coordinates');
   const masterValid = isValidIndonesianCoords(branch.lat, branch.lng);
 
@@ -155,7 +128,123 @@ export function CoordinateComparisonMap({
     );
   }, [masterPoint, googlePoint]);
 
-  const defaultCenter = googlePoint || masterPoint || { lat: -6.2, lng: 106.816666 };
+  const googleMapsUrl =
+    branch.googleMapsUri ||
+    `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+      `BRI ${branch.name} ${branch.city}`
+    )}`;
+
+  // Initialize Leaflet map once
+  useEffect(() => {
+    if (!containerRef.current || mapRef.current) return;
+
+    const initialCenter: [number, number] = googlePoint
+      ? [googlePoint.lat, googlePoint.lng]
+      : masterPoint
+        ? [masterPoint.lat, masterPoint.lng]
+        : [-6.2, 106.816666];
+
+    const map = L.map(containerRef.current, {
+      center: initialCenter,
+      zoom: 16,
+      zoomControl: true,
+      attributionControl: true,
+    });
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      maxZoom: 19,
+    }).addTo(map);
+    const layerGroup = L.layerGroup().addTo(map);
+
+    mapRef.current = map;
+    layerGroupRef.current = layerGroup;
+
+    const ro = new ResizeObserver(() => {
+      map.invalidateSize();
+    });
+    ro.observe(containerRef.current);
+
+    window.setTimeout(() => {
+      map.invalidateSize();
+    }, 120);
+
+    return () => {
+      ro.disconnect();
+      map.remove();
+      mapRef.current = null;
+      layerGroupRef.current = null;
+    };
+  }, []);
+
+  // Update markers, dashed polyline, and viewport bounds when coordinates change
+  useEffect(() => {
+    const map = mapRef.current;
+    const layerGroup = layerGroupRef.current;
+    if (!map || !layerGroup) return;
+
+    layerGroup.clearLayers();
+
+    if (masterPoint) {
+      const masterMarker = L.marker([masterPoint.lat, masterPoint.lng], {
+        icon: createPinIcon('#00529C', '#ffffff', 30),
+        zIndexOffset: 20,
+      }).bindPopup(
+        `<div style="font-size:12px;line-height:1.45;">
+          <strong style="color:#00529C;">Master BRI</strong><br/>
+          <span>${escapeHtml(branch.name)}</span><br/>
+          <code style="font-size:11px;color:#444653;">${masterPoint.lat.toFixed(6)}, ${masterPoint.lng.toFixed(6)}</code>
+        </div>`,
+        { className: 'bri-leaflet-popup' }
+      );
+      masterMarker.addTo(layerGroup);
+    }
+
+    if (googlePoint) {
+      const label = liveLabel || `Lokasi Pembanding Maps (${branch.name})`;
+      const googleMarker = L.marker([googlePoint.lat, googlePoint.lng], {
+        icon: createPinIcon('#dc2626', '#fde047', 30),
+        zIndexOffset: 30,
+      }).bindPopup(
+        `<div style="font-size:12px;line-height:1.45;">
+          <strong style="color:#dc2626;">Titik Google Maps</strong><br/>
+          <span>${escapeHtml(label)}</span><br/>
+          <code style="font-size:11px;color:#444653;">${googlePoint.lat.toFixed(6)}, ${googlePoint.lng.toFixed(6)}</code>
+        </div>`,
+        { className: 'bri-leaflet-popup' }
+      );
+      googleMarker.addTo(layerGroup);
+    }
+
+    if (masterPoint && googlePoint) {
+      L.polyline(
+        [
+          [masterPoint.lat, masterPoint.lng],
+          [googlePoint.lat, googlePoint.lng],
+        ],
+        {
+          color: '#dc2626',
+          weight: 3,
+          opacity: 0.85,
+          dashArray: '6, 6',
+        }
+      ).addTo(layerGroup);
+
+      const bounds = L.latLngBounds(
+        [masterPoint.lat, masterPoint.lng],
+        [googlePoint.lat, googlePoint.lng]
+      );
+      map.fitBounds(bounds, { padding: [46, 46], maxZoom: 17 });
+    } else if (googlePoint) {
+      map.setView([googlePoint.lat, googlePoint.lng], 16);
+    } else if (masterPoint) {
+      map.setView([masterPoint.lat, masterPoint.lng], 16);
+    } else {
+      map.setView([-6.2, 106.816666], 12);
+    }
+
+    map.invalidateSize();
+  }, [branch.name, masterPoint, googlePoint, liveLabel]);
 
   return (
     <div className="rounded-2xl bg-[#f8fafc] border border-[#e2e8f0] p-4 space-y-3">
@@ -167,67 +256,44 @@ export function CoordinateComparisonMap({
           </span>
         </div>
 
-        {distanceMeters !== null ? (
-          <span
-            className={`px-2.5 py-1 rounded-xl font-mono text-xs font-bold tabular-nums ${
-              distanceMeters > 50
-                ? 'bg-[#fef2f2] text-[#dc2626] border border-[#fecaca]'
-                : 'bg-[#ecfdf5] text-[#059669] border border-[#a7f3d0]'
-            }`}
+        <div className="flex flex-wrap items-center gap-2">
+          {distanceMeters !== null ? (
+            <span
+              className={`px-2.5 py-1 rounded-xl font-mono text-xs font-bold tabular-nums ${
+                distanceMeters > 50
+                  ? 'bg-[#fef2f2] text-[#dc2626] border border-[#fecaca]'
+                  : 'bg-[#ecfdf5] text-[#059669] border border-[#a7f3d0]'
+              }`}
+            >
+              Jarak Ketidaktepatan: {formatDistanceId(distanceMeters)}
+            </span>
+          ) : !masterValid ? (
+            <span className="px-2.5 py-1 rounded-xl font-mono text-xs font-semibold bg-[#fef2f2] text-[#dc2626] border border-[#fecaca]">
+              Koordinat Master belum valid ({branch.lat}, {branch.lng})
+            </span>
+          ) : (
+            <span className="px-2.5 py-1 rounded-xl font-mono text-xs text-[#64748b] bg-white border border-[#e2e8f0]">
+              Menampilkan titik Master BRI
+            </span>
+          )}
+
+          <a
+            href={googleMapsUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="h-7 px-2.5 rounded-xl bg-white border border-[#cbd5e1] hover:bg-[#eff6ff] hover:border-[#00529C] text-[11px] font-semibold text-[#00529C] inline-flex items-center gap-1 smooth-transition whitespace-nowrap"
           >
-            Jarak Ketidaktepatan: {formatDistanceId(distanceMeters)}
-          </span>
-        ) : !masterValid ? (
-          <span className="px-2.5 py-1 rounded-xl font-mono text-xs font-semibold bg-[#fef2f2] text-[#dc2626] border border-[#fecaca]">
-            Koordinat Master belum valid ({branch.lat}, {branch.lng})
-          </span>
-        ) : (
-          <span className="px-2.5 py-1 rounded-xl font-mono text-xs text-[#64748b] bg-white border border-[#e2e8f0]">
-            Menunggu koordinat pembanding Google Maps
-          </span>
-        )}
+            <span>Buka di Google Maps</span>
+            <ExternalLink className="h-3 w-3" />
+          </a>
+        </div>
       </div>
 
-      {/* Explicit container height required by Google Maps JS */}
-      <div className={`relative ${heightClass} w-full rounded-xl overflow-hidden border border-[#cbd5e1] bg-[#eef2f6]`}>
-        {mapsApiKey ? (
-          <GoogleMap
-            mapId="DEMO_MAP_ID"
-            internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
-            defaultCenter={defaultCenter}
-            defaultZoom={16}
-            gestureHandling="greedy"
-            mapTypeControl={false}
-            streetViewControl={false}
-            style={{ width: '100%', height: '100%' }}
-          >
-            <DiscrepancyMapOverlay masterPoint={masterPoint} googlePoint={googlePoint} />
-
-            {masterPoint && (
-              <AdvancedMarker
-                position={masterPoint}
-                title={`Master BRI: ${branch.name}`}
-                zIndex={20}
-              >
-                <Pin background="#00529C" borderColor="#ffffff" glyphColor="#ffffff" scale={1.05} />
-              </AdvancedMarker>
-            )}
-
-            {googlePoint && (
-              <AdvancedMarker
-                position={googlePoint}
-                title={liveLabel || `Lokasi Asli Google Maps: ${branch.name}`}
-                zIndex={30}
-              >
-                <Pin background="#dc2626" borderColor="#ffffff" glyphColor="#ffffff" scale={1.05} />
-              </AdvancedMarker>
-            )}
-          </GoogleMap>
-        ) : (
-          <div className="h-full flex items-center justify-center p-4 text-center text-xs text-[#64748b]">
-            Memuat peta perbandingan Google Maps...
-          </div>
-        )}
+      {/* Explicit container height for Leaflet */}
+      <div
+        className={`relative ${heightClass} w-full rounded-xl overflow-hidden border border-[#cbd5e1] bg-[#eef2f6]`}
+      >
+        <div ref={containerRef} className="w-full h-full" />
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
@@ -237,14 +303,16 @@ export function CoordinateComparisonMap({
             <span>Titik Koordinat Master BRI</span>
           </div>
           <p className="font-mono text-[11px] text-[#1a1b22] tabular-nums">
-            {masterValid ? `${branch.lat.toFixed(6)}, ${branch.lng.toFixed(6)}` : `${branch.lat}, ${branch.lng} (Tidak Valid)`}
+            {masterValid
+              ? `${branch.lat.toFixed(6)}, ${branch.lng.toFixed(6)}`
+              : `${branch.lat}, ${branch.lng} (Tidak Valid)`}
           </p>
         </div>
 
         <div className="rounded-xl bg-white border border-[#e2e8f0] p-2.5 space-y-0.5">
           <div className="flex items-center gap-1.5 font-semibold text-[#dc2626]">
             <MapPin className="h-3.5 w-3.5" />
-            <span>Titik Lokasi Asli Google Maps</span>
+            <span>Titik Lokasi Pembanding Google Maps</span>
           </div>
           <p className="font-mono text-[11px] text-[#1a1b22] tabular-nums">
             {googlePoint

@@ -6,7 +6,6 @@ import {
   localRegister,
   localResendCode,
   localVerifyEmail,
-  tryBackendJson,
 } from '../services/localEngine';
 import type { AuthUser } from '../types/ops';
 
@@ -65,66 +64,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
 
   useEffect(() => {
-    let active = true;
-    async function restoreSession() {
-      if (!token) {
-        if (active) setIsCheckingAuth(false);
-        return;
-      }
+    if (!token) {
+      setUser(null);
+      setIsCheckingAuth(false);
+      return;
+    }
 
-      if (token.startsWith('local-')) {
-        const localUser = localGetMe(token);
-        if (active) {
-          if (localUser) {
-            setUser(localUser);
-          } else {
-            setUser(null);
-            setToken(null);
-            try {
-              window.localStorage.removeItem(AUTH_TOKEN_KEY);
-            } catch {
-              // ignore
-            }
-          }
-          setIsCheckingAuth(false);
-        }
-        return;
-      }
-
+    const localUser = localGetMe(token);
+    if (localUser) {
+      setUser(localUser);
+    } else {
+      setUser(null);
+      setToken(null);
       try {
-        const result = await tryBackendJson<{ user?: AuthUser }>('/api/auth/me', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (result.available && result.ok && result.data?.user) {
-          if (active) setUser(result.data.user);
-          return;
-        }
-        if (!result.available) {
-          const localUser = localGetMe(token);
-          if (localUser) {
-            if (active) setUser(localUser);
-            return;
-          }
-        }
-        throw new Error('Unauthorized');
+        window.localStorage.removeItem(AUTH_TOKEN_KEY);
       } catch {
-        if (active) {
-          setUser(null);
-          setToken(null);
-          try {
-            window.localStorage.removeItem(AUTH_TOKEN_KEY);
-          } catch {
-            // ignore
-          }
-        }
-      } finally {
-        if (active) setIsCheckingAuth(false);
+        // ignore
       }
     }
-    restoreSession();
-    return () => {
-      active = false;
-    };
+    setIsCheckingAuth(false);
   }, [token]);
 
   const persistSession = useCallback((newToken: string, newUser: AuthUser) => {
@@ -139,34 +97,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const login = useCallback(
     async (username: string, password: string) => {
-      const result = await tryBackendJson<{
-        token?: string;
-        user?: AuthUser;
-        error?: string;
-        needsVerification?: boolean;
-        email?: string;
-        username?: string;
-      }>('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
-
-      if (result.available) {
-        const data = result.data ?? {};
-        if (!result.ok || !data.token || !data.user) {
-          return {
-            ok: false,
-            error: data.error || 'Gagal masuk. Periksa kembali username dan password Anda.',
-            needsVerification: data.needsVerification,
-            email: data.email,
-            username: data.username,
-          };
-        }
-        persistSession(data.token, data.user);
-        return { ok: true };
-      }
-
       const localRes = localLogin(username, password);
       if (localRes.ok && localRes.token && localRes.user) {
         persistSession(localRes.token, localRes.user);
@@ -185,31 +115,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const register = useCallback(
     async (payload: { username: string; email: string; password: string; fullName?: string }) => {
-      const result = await tryBackendJson<{
-        ok?: boolean;
-        error?: string;
-        username?: string;
-        email?: string;
-        verificationPreview?: VerificationPreview;
-      }>('/api/auth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-
-      if (result.available) {
-        const data = result.data ?? {};
-        if (!result.ok) {
-          return { ok: false, error: data.error || 'Pendaftaran akun gagal.' };
-        }
-        return {
-          ok: true,
-          username: data.username,
-          email: data.email,
-          verificationPreview: data.verificationPreview,
-        };
-      }
-
       return localRegister(payload);
     },
     []
@@ -217,25 +122,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const verifyEmail = useCallback(
     async (identifier: string, code: string) => {
-      const result = await tryBackendJson<{
-        token?: string;
-        user?: AuthUser;
-        error?: string;
-      }>('/api/auth/verify-email', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ identifier, code }),
-      });
-
-      if (result.available) {
-        const data = result.data ?? {};
-        if (!result.ok || !data.token || !data.user) {
-          return { ok: false, error: data.error || 'Verifikasi gagal.' };
-        }
-        persistSession(data.token, data.user);
-        return { ok: true };
-      }
-
       const localRes = localVerifyEmail(identifier, code);
       if (localRes.ok && localRes.token && localRes.user) {
         persistSession(localRes.token, localRes.user);
@@ -247,36 +133,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const resendCode = useCallback(async (identifier: string) => {
-    const result = await tryBackendJson<{
-      ok?: boolean;
-      error?: string;
-      verificationPreview?: VerificationPreview;
-    }>('/api/auth/resend-code', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ identifier }),
-    });
-
-    if (result.available) {
-      const data = result.data ?? {};
-      if (!result.ok) {
-        return { ok: false, error: data.error || 'Gagal mengirim ulang kode.' };
-      }
-      return { ok: true, verificationPreview: data.verificationPreview };
-    }
-
     return localResendCode(identifier);
   }, []);
 
   const logout = useCallback(async () => {
     if (token) {
       localLogout(token);
-      if (!token.startsWith('local-')) {
-        await tryBackendJson('/api/auth/logout', {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${token}` },
-        });
-      }
     }
     setUser(null);
     setToken(null);
