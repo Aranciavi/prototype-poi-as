@@ -1,0 +1,8 @@
+{
+  "name": "Remix Project Protorype Tugas Kompre",
+  "description": "Dasbor operasional Location Intelligence & sinkronisasi Google Business Profile (GBP) jaringan kantor cabang perbankan berbasis Bahasa Indonesia dengan saran balasan ulasan bertenaga Gemini API.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

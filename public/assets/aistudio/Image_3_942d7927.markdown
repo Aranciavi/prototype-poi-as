@@ -1,0 +1,237 @@
+---
+name: Location Intelligence & GBP Sync Operations
+colors:
+  surface: '#fbf8ff'
+  surface-dim: '#dad9e3'
+  surface-bright: '#fbf8ff'
+  surface-container-lowest: '#ffffff'
+  surface-container-low: '#f4f2fc'
+  surface-container: '#eeedf7'
+  surface-container-high: '#e8e7f1'
+  surface-container-highest: '#e3e1eb'
+  on-surface: '#1a1b22'
+  on-surface-variant: '#444653'
+  inverse-surface: '#2f3037'
+  inverse-on-surface: '#f1f0fa'
+  outline: '#757684'
+  outline-variant: '#c4c5d5'
+  surface-tint: '#3755c3'
+  primary: '#00288e'
+  on-primary: '#ffffff'
+  primary-container: '#1e40af'
+  on-primary-container: '#a8b8ff'
+  inverse-primary: '#b8c4ff'
+  secondary: '#0051d5'
+  on-secondary: '#ffffff'
+  secondary-container: '#316bf3'
+  on-secondary-container: '#fefcff'
+  tertiary: '#003757'
+  on-tertiary: '#ffffff'
+  tertiary-container: '#004f7a'
+  on-tertiary-container: '#77c2ff'
+  error: '#ba1a1a'
+  on-error: '#ffffff'
+  error-container: '#ffdad6'
+  on-error-container: '#93000a'
+  primary-fixed: '#dde1ff'
+  primary-fixed-dim: '#b8c4ff'
+  on-primary-fixed: '#001453'
+  on-primary-fixed-variant: '#173bab'
+  secondary-fixed: '#dbe1ff'
+  secondary-fixed-dim: '#b4c5ff'
+  on-secondary-fixed: '#00174b'
+  on-secondary-fixed-variant: '#003ea8'
+  tertiary-fixed: '#cce5ff'
+  tertiary-fixed-dim: '#93ccff'
+  on-tertiary-fixed: '#001d31'
+  on-tertiary-fixed-variant: '#004b73'
+  background: '#fbf8ff'
+  on-background: '#1a1b22'
+  surface-variant: '#e3e1eb'
+  status-synced-bg: '#ecfdf5'
+  status-synced-fg: '#059669'
+  status-synced-border: '#a7f3d0'
+  status-warning-bg: '#fffbeb'
+  status-warning-fg: '#d97706'
+  status-warning-border: '#fde68a'
+  status-error-bg: '#fef2f2'
+  status-error-fg: '#dc2626'
+  status-error-border: '#fecaca'
+  status-processing-bg: '#eff6ff'
+  status-processing-fg: '#2563eb'
+  status-processing-border: '#bfdbfe'
+typography:
+  display-lg:
+    fontFamily: Plus Jakarta Sans
+    fontSize: 32px
+    fontWeight: '700'
+    lineHeight: 40px
+    letterSpacing: -0.02em
+  headline-lg:
+    fontFamily: Plus Jakarta Sans
+    fontSize: 24px
+    fontWeight: '600'
+    lineHeight: 32px
+    letterSpacing: -0.015em
+  headline-lg-mobile:
+    fontFamily: Plus Jakarta Sans
+    fontSize: 20px
+    fontWeight: '600'
+    lineHeight: 28px
+    letterSpacing: -0.01em
+  headline-md:
+    fontFamily: Plus Jakarta Sans
+    fontSize: 18px
+    fontWeight: '600'
+    lineHeight: 24px
+    letterSpacing: -0.01em
+  headline-sm:
+    fontFamily: Plus Jakarta Sans
+    fontSize: 16px
+    fontWeight: '600'
+    lineHeight: 22px
+  body-lg:
+    fontFamily: Inter
+    fontSize: 15px
+    fontWeight: '400'
+    lineHeight: 24px
+  body-md:
+    fontFamily: Inter
+    fontSize: 14px
+    fontWeight: '400'
+    lineHeight: 20px
+  body-sm:
+    fontFamily: Inter
+    fontSize: 12px
+    fontWeight: '400'
+    lineHeight: 16px
+  label-md:
+    fontFamily: Inter
+    fontSize: 13px
+    fontWeight: '500'
+    lineHeight: 18px
+  label-sm:
+    fontFamily: Inter
+    fontSize: 11px
+    fontWeight: '600'
+    lineHeight: 14px
+    letterSpacing: 0.04em
+  code-num:
+    fontFamily: Inter
+    fontSize: 13px
+    fontWeight: '500'
+    lineHeight: 18px
+    letterSpacing: -0.01em
+rounded:
+  sm: 0.5rem
+  DEFAULT: 1rem
+  md: 1.5rem
+  lg: 2rem
+  xl: 3rem
+  full: 9999px
+spacing:
+  gutter: 1rem
+  gutter-desktop: 1.5rem
+  margin: 1rem
+  margin-desktop: 2rem
+  space-xs: 0.25rem
+  space-sm: 0.5rem
+  space-md: 1rem
+  space-lg: 1.5rem
+  space-xl: 2rem
+---
+
+## Brand & Style
+The design system establishes an authoritative enterprise telemetry and operations interface tailored for multi-location presence management, Google Business Profile (GBP) synchronization, and reputation orchestration. 
+
+The visual style merges Modern Corporate Precision with welcoming, organic softness. It abandons harsh, rigid rectangular boundaries in favor of smooth, generous curves (16px–24px) across structural modules while preserving high-density analytical rigor and calm enterprise reliability. The aesthetic delivers immediate operational clarity, reduces visual tension across dense data grids, and projects an approachable yet dependable governance environment suited for executive and franchise management workflows.
+
+## Colors
+The color scheme prioritizes high legibility, strict contrast compliance, and immediate semantic triage across thousands of distributed physical locations.
+
+### Chromatic Anchors
+- **Primary (`#1e40af`)**: Deep Corporate Blue. Applied to active navigation rails, key KPI highlights, and core interaction drivers.
+- **Secondary (`#2563eb`)**: Cobalt Blue. Drives interactive hover states, active selection outlines, links, and map pin accents.
+- **Tertiary (`#0284c7`)**: Slate Cyan. Manages live synchronization indicators, data comparison streams, and telemetry trends.
+
+### Surface Architecture
+- **Base Canvas**: `#faf8ff` for application canvas, ensuring subtle warm neutral depth beneath cards.
+- **Surface Cards & Modules**: `#ffffff` for elevated analytical cards, tables, and interaction drawers.
+- **Surface Low/Container**: `#f1f5f9` for table headers, segmented filter chips, and pill containers.
+- **Borders & Dividers**: `#e2e8f0` for crisp, structural card boundaries; `#cbd5e1` for elevated hover boundaries.
+
+### Semantic Status Colors
+- **Tersinkronisasi (Synced)**: `#ecfdf5` background, `#059669` foreground, `#a7f3d0` border.
+- **Perbedaan Data (Discrepancy)**: `#fffbeb` background, `#d97706` foreground, `#fde68a` border.
+- **Perlu Tindakan (Action Required)**: `#fef2f2` background, `#dc2626` foreground, `#fecaca` border.
+- **Sedang Memproses (Processing)**: `#eff6ff` background, `#2563eb` foreground, `#bfdbfe` border.
+
+## Typography
+The typographic hierarchy blends structured geometric presence for headings with high-legibility tabular clarity for data-heavy operations.
+
+- **Plus Jakarta Sans**: Applied to all section headers, modal titles, and macro KPI aggregates. Provides a warm, contemporary balance that complements soft container silhouettes.
+- **Inter**: Governs table rows, form controls, review text, meta tags, and coordinates. Ensures high readability on dense multi-line Indonesian text structures (e.g., *Penyesuaian Jam Operasional*, *Tingkat Penyelesaian Ulasan*).
+- **Tabular Figures**: Always enable `font-variant-numeric: tabular-nums` (`tnum`) across all telemetry, store IDs, telephone numbers, review scores, and timestamps to preserve clean vertical alignment.
+
+## Layout & Spacing
+A fluid 12-column grid system paired with strict 8px/4px spatial intervals anchors the interface.
+
+### Screen Adaptability
+- **Mobile (<768px)**: 4 columns, `margin: 1rem`, `gutter: 1rem`. Analytical cards reflow into standalone vertical stacks; maps collapse into full-screen drawer overlays with rounded sheet headers.
+- **Tablet (768px–1199px)**: 8 columns, `margin: 1.5rem`, `gutter: 1rem`. Master-detail location panes convert into switchable stacked tabs.
+- **Desktop (≥1200px)**: 12 columns, `margin-desktop: 2rem`, `gutter-desktop: 1.5rem`. Maximum layout canvas width capped at `1600px` to maintain comfortable eye tracking across multi-metric dashboards.
+
+### Internal Spacing Rhythm
+- **Data Tables**: Row height 48px to accommodate soft focus indicators; horizontal cell padding uses `space-md`.
+- **Containers & Cards**: Default interior padding is `space-lg` (24px) to balance the rounded outer borders without clipping internal corner text.
+
+## Elevation & Depth
+Depth relies on soft tonal separation, ambient low-opacity shadows, and gentle boundary outlines that complement the curved corner language.
+
+- **Level 0 (Canvas Base)**: Flat background `#faf8ff`.
+- **Level 1 (Cards, KPI Widgets, Panels)**: `#ffffff` surface, bounded by 1px solid `#e2e8f0`, with subtle ambient drop shadow: `0 4px 20px -2px rgba(15, 23, 42, 0.05)`.
+- **Level 2 (Popovers, Filter Menus, Hovered Cards)**: `#ffffff` surface, 1px solid `#cbd5e1`, shadow: `0 10px 25px -4px rgba(15, 23, 42, 0.08), 0 4px 8px -2px rgba(15, 23, 42, 0.03)`.
+- **Level 3 (Modals, Slide-over Review Drawers, Alert Toasts)**: `#ffffff` surface, 1px solid `#e2e8f0`, shadow: `0 25px 40px -8px rgba(15, 23, 42, 0.14), 0 10px 16px -6px rgba(15, 23, 42, 0.06)`.
+- **Backdrop Scrim**: `rgba(15, 23, 42, 0.35)` with `backdrop-filter: blur(4px)`.
+
+## Shapes
+In line with the requirement to replace sharp, boxy geometry with soft, modern curves ("jangan terlalu kotak untuk sudutnya buat melengkung untuk setiap perseginya"), the design system implements an expanded, visibly rounded shape scale:
+
+- **Interactive Controls (Buttons, Text Inputs, Selects, Search Bars)**: Standardized at `16px` (`rounded-2xl`). This ensures every touchpoint feels gentle, approachable, and noticeably curved.
+- **Badges, Tags, & Status Indicators**: Full pill curvature (`9999px`) or `16px` for multi-line tags.
+- **Standard Cards, Data Grids, and KPI Panels**: `20px` to `24px` (`rounded-3xl` / `1.25rem`–`1.5rem`), creating distinctive, friendly card enclosures that frame metrics comfortably.
+- **Modals, Floating Panels, & Slide-Over Drawers**: `24px` (`rounded-3xl`) on outer corners (and top-leading / top-trailing corners for bottom sheets on mobile).
+- **Embedded Inner Elements (e.g., Table Row hover containers, Nested Media, Sub-panels)**: `12px` to `16px` to nest harmoniously within parent containers without corner dissonance.
+
+## Components
+
+### Buttons
+- **Primary Action**: Solid `#1e40af`, text `#ffffff`, border-radius `16px`. Height 44px (touch-friendly), horizontal padding `20px`. Hover: `#1d4ed8`; Active: `#172554`.
+- **Secondary / Outline**: Surface `#ffffff`, border 1.5px solid `#cbd5e1`, text `#1e293b`, border-radius `16px`. Hover: background `#f8fafc` and border `#94a3b8`.
+- **Soft / Tertiary**: Background `#eff6ff`, text `#1e40af`, border-radius `16px`. Hover: background `#dbeafe`.
+- **Destructive**: Background `#fef2f2`, border 1px solid `#fecaca`, text `#dc2626`, border-radius `16px`.
+
+### Form Fields & Inputs
+- **Text Inputs & Dropdowns**: Height 44px, surface `#ffffff`, border 1.5px solid `#cbd5e1`, border-radius `16px`, internal padding `0 16px`. Text `#131b2e`, placeholder `#94a3b8`.
+- **Focus State**: Border color `#2563eb`, surrounded by a smooth 4px soft ring in `rgba(37, 99, 235, 0.15)` adhering to the 16px rounded profile.
+- **Search Bar**: Pill or 16px radius, integrated search icon leading, clear button trailing.
+
+### Cards & Analytical Modules
+- **Metric & Telemetry Cards**: Background `#ffffff`, border-radius `20px`–`24px`, border 1px solid `#e2e8f0`, padding `24px`. Internal badges and trend pills follow rounded-full styling.
+- **Nested Content Panels**: Sub-sections inside cards adopt `16px` border-radius with `#f8fafc` background to preserve proportional curve nesting.
+
+### Status Badges & Pills
+- **Geometry**: Height 24px–28px, border-radius `9999px` (pill), horizontal padding `12px`.
+- **Tersinkronisasi**: Background `#ecfdf5`, text `#065f46`, border 1px solid `#a7f3d0`. Contains a 6px circular green indicator dot.
+- **Perbedaan Data**: Background `#fffbeb`, text `#92400e`, border 1px solid `#fde68a`.
+- **Perlu Tindakan**: Background `#fef2f2`, text `#991b1b`, border 1px solid `#fecaca`.
+- **Sedang Memproses**: Background `#eff6ff`, text `#1e40af`, border 1px solid `#bfdbfe`.
+
+### Location List & Data Tables
+- **Container**: Enclosing table container uses `20px` border-radius with `overflow: hidden` and a 1px border in `#e2e8f0`.
+- **Header**: `#f8fafc`, typography `label-sm` in `#475569`, border-bottom 1px solid `#e2e8f0`.
+- **Rows**: Alternating hover fill `#f1f5f9`. Row action triggers and menu buttons maintain `12px` corner radii.
+
+### Modals & Slide-Over Drawers
+- **Modal Dialog**: Centered canvas, border-radius `24px`, border 1px solid `#e2e8f0`, padding `28px`.
+- **Slide-over Panel**: Anchored to right viewport; top-left and bottom-left inner corners curved to `24px`. Includes quick AI response suggestion chips with `16px` border-radius (*Saran Jawaban Cepat*).
