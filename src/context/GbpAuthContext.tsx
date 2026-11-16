@@ -9,6 +9,7 @@ import {
   type User,
 } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
+import { tryBackendJson } from '../services/localEngine';
 import type { GbpAccount, GbpLocationSummary } from '../types/ops';
 
 const firebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
@@ -64,22 +65,45 @@ export function GbpAuthProvider({ children }: { children: React.ReactNode }) {
       if (!accountName || !token) return;
       setIsLoadingGbpData(true);
       try {
-        const res = await fetch(
-          `/api/gbp/locations?accountName=${encodeURIComponent(accountName)}`,
+        const result = await tryBackendJson<{
+          locations?: GbpLocationSummary[];
+          error?: string;
+        }>(`/api/gbp/locations?accountName=${encodeURIComponent(accountName)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        if (result.available) {
+          if (!result.ok) {
+            setGbpError(
+              result.data?.error || 'Gagal memuat daftar lokasi dari Google Business Profile.'
+            );
+            setGbpLocations([]);
+            return;
+          }
+          setGbpLocations(Array.isArray(result.data?.locations) ? result.data.locations : []);
+          return;
+        }
+
+        // Direct browser call fallback for static Vercel deployment
+        const directRes = await fetch(
+          `https://mybusinessbusinessinformation.googleapis.com/v1/${accountName}/locations?readMask=name,title,storeCode,phoneNumbers,websiteUri,storefrontAddress,latlng,metadata&pageSize=100`,
           {
             headers: { Authorization: `Bearer ${token}` },
           }
         );
-        const data = (await res.json()) as {
+        const directData = (await directRes.json()) as {
           locations?: GbpLocationSummary[];
-          error?: string;
+          error?: { message?: string };
         };
-        if (!res.ok) {
-          setGbpError(data.error || 'Gagal memuat daftar lokasi dari Google Business Profile.');
+        if (!directRes.ok) {
+          setGbpError(
+            directData.error?.message ||
+              'Gagal memuat daftar lokasi langsung dari Google Business Profile API.'
+          );
           setGbpLocations([]);
           return;
         }
-        setGbpLocations(Array.isArray(data.locations) ? data.locations : []);
+        setGbpLocations(Array.isArray(directData.locations) ? directData.locations : []);
       } catch {
         setGbpError('Tidak dapat terhubung ke Google Business Profile Business Information API.');
       } finally {
@@ -96,24 +120,50 @@ export function GbpAuthProvider({ children }: { children: React.ReactNode }) {
       setIsLoadingGbpData(true);
       setGbpError(null);
       try {
-        const res = await fetch('/api/gbp/accounts', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        const data = (await res.json()) as {
+        const result = await tryBackendJson<{
           accounts?: GbpAccount[];
           error?: string;
           hint?: string;
-        };
-        if (!res.ok) {
-          setGbpError(
-            data.error ||
-              'Akun Google terautentikasi, namun akses Google Business Profile API belum aktif pada proyek Google Cloud ini.'
+        }>('/api/gbp/accounts', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        let accList: GbpAccount[] = [];
+        if (result.available) {
+          if (!result.ok) {
+            setGbpError(
+              result.data?.error ||
+                'Akun Google terautentikasi, namun akses Google Business Profile API belum aktif pada proyek Google Cloud ini.'
+            );
+            setAccounts([]);
+            setGbpLocations([]);
+            return;
+          }
+          accList = Array.isArray(result.data?.accounts) ? result.data.accounts : [];
+        } else {
+          // Direct browser call fallback for static Vercel deployment
+          const directRes = await fetch(
+            'https://mybusinessaccountmanagement.googleapis.com/v1/accounts',
+            {
+              headers: { Authorization: `Bearer ${token}` },
+            }
           );
-          setAccounts([]);
-          setGbpLocations([]);
-          return;
+          const directData = (await directRes.json()) as {
+            accounts?: GbpAccount[];
+            error?: { message?: string };
+          };
+          if (!directRes.ok) {
+            setGbpError(
+              directData.error?.message ||
+                'Akun Google terautentikasi, namun akses Google Business Profile API belum aktif pada proyek Google Cloud ini.'
+            );
+            setAccounts([]);
+            setGbpLocations([]);
+            return;
+          }
+          accList = Array.isArray(directData.accounts) ? directData.accounts : [];
         }
-        const accList = Array.isArray(data.accounts) ? data.accounts : [];
+
         setAccounts(accList);
         if (accList.length > 0) {
           const targetAcc =

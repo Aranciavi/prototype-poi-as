@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import { AlertCircle, CheckCircle2, Loader2, RefreshCw, Send, Sparkles, Star, X } from 'lucide-react';
 import { useGbpAuth } from '../context/GbpAuthContext';
 import { useOps } from '../context/OpsContext';
+import { buildLocalSuggestions, tryBackendJson } from '../services/localEngine';
 import type { ReviewSuggestion } from '../types/ops';
 
 export function ReviewReplyDrawer() {
@@ -23,7 +24,10 @@ export function ReviewReplyDrawer() {
     setIsGenerating(true);
     setAiError(null);
     try {
-      const res = await fetch('/api/reviews/suggest', {
+      const result = await tryBackendJson<{
+        suggestions?: ReviewSuggestion[];
+        error?: string;
+      }>('/api/reviews/suggest', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -34,17 +38,30 @@ export function ReviewReplyDrawer() {
           comment: activeReview.comment,
         }),
       });
-      const data = (await res.json()) as {
-        suggestions?: ReviewSuggestion[];
-        error?: string;
-      };
-      if (!res.ok || !Array.isArray(data.suggestions)) {
-        throw new Error(data.error || 'Gagal memuat saran jawaban otomatis.');
+
+      if (result.available && result.ok && Array.isArray(result.data?.suggestions)) {
+        setSuggestions(result.data.suggestions);
+        return;
       }
-      setSuggestions(data.suggestions);
-    } catch (err) {
-      setAiError(err instanceof Error ? err.message : 'Layanan AI sedang tidak tersedia.');
-      setSuggestions([]);
+
+      // Fallback client-side suggestions (for Vercel static site or when Gemini API key is not configured)
+      setSuggestions(
+        buildLocalSuggestions({
+          branchName: activeReview.branchName,
+          authorName: activeReview.authorName,
+          rating: activeReview.rating,
+          comment: activeReview.comment,
+        })
+      );
+    } catch {
+      setSuggestions(
+        buildLocalSuggestions({
+          branchName: activeReview.branchName,
+          authorName: activeReview.authorName,
+          rating: activeReview.rating,
+          comment: activeReview.comment,
+        })
+      );
     } finally {
       setIsGenerating(false);
     }

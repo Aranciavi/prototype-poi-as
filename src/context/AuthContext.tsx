@@ -1,4 +1,13 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import {
+  localGetMe,
+  localLogin,
+  localLogout,
+  localRegister,
+  localResendCode,
+  localVerifyEmail,
+  tryBackendJson,
+} from '../services/localEngine';
 import type { AuthUser } from '../types/ops';
 
 const AUTH_TOKEN_KEY = 'bri_ops_auth_token_v1';
@@ -62,17 +71,42 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (active) setIsCheckingAuth(false);
         return;
       }
+
+      if (token.startsWith('local-')) {
+        const localUser = localGetMe(token);
+        if (active) {
+          if (localUser) {
+            setUser(localUser);
+          } else {
+            setUser(null);
+            setToken(null);
+            try {
+              window.localStorage.removeItem(AUTH_TOKEN_KEY);
+            } catch {
+              // ignore
+            }
+          }
+          setIsCheckingAuth(false);
+        }
+        return;
+      }
+
       try {
-        const res = await fetch('/api/auth/me', {
+        const result = await tryBackendJson<{ user?: AuthUser }>('/api/auth/me', {
           headers: { Authorization: `Bearer ${token}` },
         });
-        if (!res.ok) {
-          throw new Error('Unauthorized');
+        if (result.available && result.ok && result.data?.user) {
+          if (active) setUser(result.data.user);
+          return;
         }
-        const data = (await res.json()) as { user: AuthUser };
-        if (active) {
-          setUser(data.user);
+        if (!result.available) {
+          const localUser = localGetMe(token);
+          if (localUser) {
+            if (active) setUser(localUser);
+            return;
+          }
         }
+        throw new Error('Unauthorized');
       } catch {
         if (active) {
           setUser(null);
@@ -105,21 +139,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const login = useCallback(
     async (username: string, password: string) => {
-      try {
-        const res = await fetch('/api/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, password }),
-        });
-        const data = (await res.json()) as {
-          token?: string;
-          user?: AuthUser;
-          error?: string;
-          needsVerification?: boolean;
-          email?: string;
-          username?: string;
-        };
-        if (!res.ok || !data.token || !data.user) {
+      const result = await tryBackendJson<{
+        token?: string;
+        user?: AuthUser;
+        error?: string;
+        needsVerification?: boolean;
+        email?: string;
+        username?: string;
+      }>('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+
+      if (result.available) {
+        const data = result.data ?? {};
+        if (!result.ok || !data.token || !data.user) {
           return {
             ok: false,
             error: data.error || 'Gagal masuk. Periksa kembali username dan password Anda.',
@@ -130,29 +165,41 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
         persistSession(data.token, data.user);
         return { ok: true };
-      } catch {
-        return { ok: false, error: 'Tidak dapat terhubung ke server autentikasi.' };
       }
+
+      const localRes = localLogin(username, password);
+      if (localRes.ok && localRes.token && localRes.user) {
+        persistSession(localRes.token, localRes.user);
+        return { ok: true };
+      }
+      return {
+        ok: false,
+        error: localRes.error || 'Gagal masuk. Periksa kembali username dan password Anda.',
+        needsVerification: localRes.needsVerification,
+        email: localRes.email,
+        username: localRes.username,
+      };
     },
     [persistSession]
   );
 
   const register = useCallback(
     async (payload: { username: string; email: string; password: string; fullName?: string }) => {
-      try {
-        const res = await fetch('/api/auth/register', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        const data = (await res.json()) as {
-          ok?: boolean;
-          error?: string;
-          username?: string;
-          email?: string;
-          verificationPreview?: VerificationPreview;
-        };
-        if (!res.ok) {
+      const result = await tryBackendJson<{
+        ok?: boolean;
+        error?: string;
+        username?: string;
+        email?: string;
+        verificationPreview?: VerificationPreview;
+      }>('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (result.available) {
+        const data = result.data ?? {};
+        if (!result.ok) {
           return { ok: false, error: data.error || 'Pendaftaran akun gagal.' };
         }
         return {
@@ -161,68 +208,74 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           email: data.email,
           verificationPreview: data.verificationPreview,
         };
-      } catch {
-        return { ok: false, error: 'Tidak dapat terhubung ke server pendaftaran.' };
       }
+
+      return localRegister(payload);
     },
     []
   );
 
   const verifyEmail = useCallback(
     async (identifier: string, code: string) => {
-      try {
-        const res = await fetch('/api/auth/verify-email', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ identifier, code }),
-        });
-        const data = (await res.json()) as {
-          token?: string;
-          user?: AuthUser;
-          error?: string;
-        };
-        if (!res.ok || !data.token || !data.user) {
+      const result = await tryBackendJson<{
+        token?: string;
+        user?: AuthUser;
+        error?: string;
+      }>('/api/auth/verify-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier, code }),
+      });
+
+      if (result.available) {
+        const data = result.data ?? {};
+        if (!result.ok || !data.token || !data.user) {
           return { ok: false, error: data.error || 'Verifikasi gagal.' };
         }
         persistSession(data.token, data.user);
         return { ok: true };
-      } catch {
-        return { ok: false, error: 'Gagal menghubungi server verifikasi.' };
       }
+
+      const localRes = localVerifyEmail(identifier, code);
+      if (localRes.ok && localRes.token && localRes.user) {
+        persistSession(localRes.token, localRes.user);
+        return { ok: true };
+      }
+      return { ok: false, error: localRes.error || 'Verifikasi gagal.' };
     },
     [persistSession]
   );
 
   const resendCode = useCallback(async (identifier: string) => {
-    try {
-      const res = await fetch('/api/auth/resend-code', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ identifier }),
-      });
-      const data = (await res.json()) as {
-        ok?: boolean;
-        error?: string;
-        verificationPreview?: VerificationPreview;
-      };
-      if (!res.ok) {
+    const result = await tryBackendJson<{
+      ok?: boolean;
+      error?: string;
+      verificationPreview?: VerificationPreview;
+    }>('/api/auth/resend-code', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identifier }),
+    });
+
+    if (result.available) {
+      const data = result.data ?? {};
+      if (!result.ok) {
         return { ok: false, error: data.error || 'Gagal mengirim ulang kode.' };
       }
       return { ok: true, verificationPreview: data.verificationPreview };
-    } catch {
-      return { ok: false, error: 'Gagal menghubungi server.' };
     }
+
+    return localResendCode(identifier);
   }, []);
 
   const logout = useCallback(async () => {
     if (token) {
-      try {
-        await fetch('/api/auth/logout', {
+      localLogout(token);
+      if (!token.startsWith('local-')) {
+        await tryBackendJson('/api/auth/logout', {
           method: 'POST',
           headers: { Authorization: `Bearer ${token}` },
         });
-      } catch {
-        // ignore
       }
     }
     setUser(null);

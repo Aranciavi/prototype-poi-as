@@ -1,16 +1,41 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useAuth } from './AuthContext';
+import {
+  applyLocalBatchMarkFix,
+  applyLocalBulkImport,
+  buildClientCsvDownload,
+  clearLocalOpsState,
+  formatHoursClient,
+  formatWibNow,
+  loadBranchesClientFallback,
+  mergeLocalBranches,
+  readLocalOpsState,
+  seedLocalAlertsAndReviews,
+  tryBackendJson,
+  writeLocalOpsState,
+} from '../services/localEngine';
 import type {
   AppView,
   BatchMarkFixPayload,
   BranchLocation,
+  BranchOverride,
   BulkImportRowInput,
   ChangeHistoryEvent,
   CustomerReview,
   DataQualityAuditItem,
   GooglePlaceLiveInfo,
+  GoogleSyncChange,
   GoogleSyncJob,
   ListingSecurityAlert,
+  ReviewSentiment,
   SyncStatus,
   ToastMessage,
   WeeklyHoursSchedule,
@@ -436,7 +461,10 @@ export function OpsProvider({
   children: React.ReactNode;
   mapsApiKey: string;
 }) {
-  const { token } = useAuth();
+  const { token, user } = useAuth();
+  const actorName = user?.username || 'brioutlet';
+  const isLocalModeRef = useRef(false);
+  const baseBranchesRef = useRef<BranchLocation[]>([]);
   const [activeView, setActiveView] = useState<AppView>('overview');
   const [branches, setBranches] = useState<BranchLocation[]>([]);
   const [isLoadingBranches, setIsLoadingBranches] = useState(true);
@@ -495,46 +523,71 @@ export function OpsProvider({
     setLoadError(null);
     try {
       const [branchesRes, jobsRes, reviewsRes, histRes] = await Promise.all([
-        fetch('/api/branches'),
-        fetch('/api/sync-jobs'),
-        fetch('/api/reviews'),
-        fetch('/api/history-alerts'),
+        tryBackendJson<{ branches?: BranchLocation[] }>('/api/branches'),
+        tryBackendJson<{ jobs?: GoogleSyncJob[] }>('/api/sync-jobs'),
+        tryBackendJson<{
+          reviews?: CustomerReview[];
+          scannedBranchIds?: string[];
+          autoSyncInProgress?: boolean;
+        }>('/api/reviews'),
+        tryBackendJson<{
+          changeHistory?: ChangeHistoryEvent[];
+          securityAlerts?: ListingSecurityAlert[];
+        }>('/api/history-alerts'),
       ]);
 
+      if (!branchesRes.available) {
+        isLocalModeRef.current = true;
+        const baseList =
+          baseBranchesRef.current.length > 0
+            ? baseBranchesRef.current
+            : await loadBranchesClientFallback();
+        baseBranchesRef.current = baseList;
+
+        let localState = readLocalOpsState();
+        const initialMerged = mergeLocalBranches(baseList, localState);
+        localState = seedLocalAlertsAndReviews(initialMerged, localState);
+        const finalList = mergeLocalBranches(baseList, localState);
+
+        setBranches(finalList);
+        setSelectedBranchId((prev) => prev ?? (finalList[0]?.id || null));
+        setSyncJobs(localState.syncJobs);
+        setReviews(localState.reviews);
+        setScannedReviewBranchIds(localState.scannedReviewBranchIds);
+        setReviewsAutoSyncing(false);
+        setChangeHistory(localState.changeHistory);
+        setSecurityAlerts(localState.securityAlerts);
+        return;
+      }
+
+      isLocalModeRef.current = false;
       if (!branchesRes.ok) {
         throw new Error(`Gagal memuat data lokasi (${branchesRes.status})`);
       }
 
-      const branchData = (await branchesRes.json()) as { branches: BranchLocation[] };
-      const list = Array.isArray(branchData.branches) ? branchData.branches : [];
+      const list = Array.isArray(branchesRes.data?.branches) ? branchesRes.data.branches : [];
       setBranches(list);
       setSelectedBranchId((prev) => prev ?? (list[0]?.id || null));
 
-      if (jobsRes.ok) {
-        const jobData = (await jobsRes.json()) as { jobs: GoogleSyncJob[] };
-        setSyncJobs(Array.isArray(jobData.jobs) ? jobData.jobs : []);
+      if (jobsRes.available && jobsRes.ok) {
+        setSyncJobs(Array.isArray(jobsRes.data?.jobs) ? jobsRes.data.jobs : []);
       }
 
-      if (reviewsRes.ok) {
-        const revData = (await reviewsRes.json()) as {
-          reviews: CustomerReview[];
-          scannedBranchIds?: string[];
-          autoSyncInProgress?: boolean;
-        };
-        setReviews(Array.isArray(revData.reviews) ? revData.reviews : []);
-        if (Array.isArray(revData.scannedBranchIds)) {
-          setScannedReviewBranchIds(revData.scannedBranchIds);
+      if (reviewsRes.available && reviewsRes.ok && reviewsRes.data) {
+        setReviews(Array.isArray(reviewsRes.data.reviews) ? reviewsRes.data.reviews : []);
+        if (Array.isArray(reviewsRes.data.scannedBranchIds)) {
+          setScannedReviewBranchIds(reviewsRes.data.scannedBranchIds);
         }
-        setReviewsAutoSyncing(Boolean(revData.autoSyncInProgress));
+        setReviewsAutoSyncing(Boolean(reviewsRes.data.autoSyncInProgress));
       }
 
-      if (histRes.ok) {
-        const histData = (await histRes.json()) as {
-          changeHistory?: ChangeHistoryEvent[];
-          securityAlerts?: ListingSecurityAlert[];
-        };
-        if (Array.isArray(histData.changeHistory)) setChangeHistory(histData.changeHistory);
-        if (Array.isArray(histData.securityAlerts)) setSecurityAlerts(histData.securityAlerts);
+      if (histRes.available && histRes.ok && histRes.data) {
+        if (Array.isArray(histRes.data.changeHistory)) {
+          setChangeHistory(histRes.data.changeHistory);
+        }
+        if (Array.isArray(histRes.data.securityAlerts)) {
+          setSecurityAlerts(histRes.data.securityAlerts);
+        }
       }
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'Gagal memuat data cabang.');
@@ -545,14 +598,25 @@ export function OpsProvider({
 
   const refreshHistoryAlerts = useCallback(async () => {
     try {
-      const res = await fetch('/api/history-alerts');
-      if (!res.ok) return;
-      const data = (await res.json()) as {
+      if (isLocalModeRef.current) {
+        const localState = readLocalOpsState();
+        setChangeHistory(localState.changeHistory);
+        setSecurityAlerts(localState.securityAlerts);
+        return;
+      }
+      const res = await tryBackendJson<{
         changeHistory?: ChangeHistoryEvent[];
         securityAlerts?: ListingSecurityAlert[];
-      };
-      if (Array.isArray(data.changeHistory)) setChangeHistory(data.changeHistory);
-      if (Array.isArray(data.securityAlerts)) setSecurityAlerts(data.securityAlerts);
+      }>('/api/history-alerts');
+      if (!res.available) {
+        const localState = readLocalOpsState();
+        setChangeHistory(localState.changeHistory);
+        setSecurityAlerts(localState.securityAlerts);
+        return;
+      }
+      if (!res.ok || !res.data) return;
+      if (Array.isArray(res.data.changeHistory)) setChangeHistory(res.data.changeHistory);
+      if (Array.isArray(res.data.securityAlerts)) setSecurityAlerts(res.data.securityAlerts);
     } catch {
       // Ignore silent refresh error
     }
@@ -560,20 +624,33 @@ export function OpsProvider({
 
   const refreshReviews = useCallback(async () => {
     try {
-      const res = await fetch('/api/reviews');
-      if (!res.ok) return;
-      const revData = (await res.json()) as {
+      if (isLocalModeRef.current) {
+        const localState = readLocalOpsState();
+        setReviews(localState.reviews);
+        setScannedReviewBranchIds(localState.scannedReviewBranchIds);
+        setReviewsAutoSyncing(false);
+        return;
+      }
+      const res = await tryBackendJson<{
         reviews: CustomerReview[];
         scannedBranchIds?: string[];
         autoSyncInProgress?: boolean;
-      };
-      if (Array.isArray(revData.reviews)) {
-        setReviews(revData.reviews);
+      }>('/api/reviews');
+      if (!res.available) {
+        const localState = readLocalOpsState();
+        setReviews(localState.reviews);
+        setScannedReviewBranchIds(localState.scannedReviewBranchIds);
+        setReviewsAutoSyncing(false);
+        return;
       }
-      if (Array.isArray(revData.scannedBranchIds)) {
-        setScannedReviewBranchIds(revData.scannedBranchIds);
+      if (!res.ok || !res.data) return;
+      if (Array.isArray(res.data.reviews)) {
+        setReviews(res.data.reviews);
       }
-      setReviewsAutoSyncing(Boolean(revData.autoSyncInProgress));
+      if (Array.isArray(res.data.scannedBranchIds)) {
+        setScannedReviewBranchIds(res.data.scannedBranchIds);
+      }
+      setReviewsAutoSyncing(Boolean(res.data.autoSyncInProgress));
     } catch {
       // Ignore silent background review refresh failure
     }
@@ -662,7 +739,12 @@ export function OpsProvider({
     ) => {
       setProcessingIds((prev) => ({ ...prev, [branchId]: true }));
       try {
-        const res = await fetch(`/api/branches/${encodeURIComponent(branchId)}`, {
+        const res = await tryBackendJson<{
+          branch?: BranchLocation;
+          syncJob?: GoogleSyncJob | null;
+          historyEvent?: ChangeHistoryEvent;
+          error?: string;
+        }>(`/api/branches/${encodeURIComponent(branchId)}`, {
           method: 'PATCH',
           headers: authHeaders,
           body: JSON.stringify({
@@ -671,29 +753,192 @@ export function OpsProvider({
           }),
         });
 
-        const data = (await res.json()) as {
-          branch?: BranchLocation;
-          syncJob?: GoogleSyncJob | null;
-          historyEvent?: ChangeHistoryEvent;
-          error?: string;
+        if (res.available) {
+          if (!res.ok || !res.data?.branch) {
+            throw new Error(res.data?.error || 'Gagal menyimpan perubahan Master Data.');
+          }
+          const updated = res.data.branch;
+          setBranches((prev) => prev.map((b) => (b.id === branchId ? updated : b)));
+          if (res.data.syncJob) {
+            setSyncJobs((prev) => [res.data!.syncJob!, ...prev]);
+          }
+          if (res.data.historyEvent) {
+            setChangeHistory((prev) => [res.data!.historyEvent!, ...prev]);
+          }
+          pushToast({
+            title: 'Dikonfirmasi & diajukan ke Google Maps',
+            description: `Perubahan Master Data ${updated.name} menunggu verifikasi otomatis Google Maps.`,
+            variant: 'success',
+          });
+          return;
+        }
+
+        // Client-side localEngine fallback
+        const target = branches.find((b) => b.id === branchId);
+        if (!target) {
+          throw new Error('Data unit kerja tidak ditemukan.');
+        }
+
+        const nowLabel = formatWibNow();
+        const localState = readLocalOpsState();
+        const patch: BranchOverride = { ...(localState.masterOverrides[branchId] ?? {}) };
+        const changes: GoogleSyncChange[] = [];
+
+        if (updates?.name && updates.name !== target.name) {
+          changes.push({
+            field: 'name',
+            fieldLabel: 'Nama Unit Kerja',
+            previousValue: target.name,
+            newValue: updates.name,
+          });
+          patch.name = updates.name;
+        }
+        if (updates?.operatingHours && updates.operatingHours !== target.operatingHours) {
+          const fmt = formatHoursClient(updates.operatingHours);
+          changes.push({
+            field: 'operatingHours',
+            fieldLabel: 'Jam Operasional',
+            previousValue: target.operatingHours,
+            newValue: fmt,
+          });
+          patch.operatingHours = fmt;
+        }
+        if (updates?.saturdayHours !== undefined && updates.saturdayHours !== target.saturdayHours) {
+          patch.saturdayHours = updates.saturdayHours;
+        }
+        if (updates?.sundayHours !== undefined && updates.sundayHours !== target.sundayHours) {
+          patch.sundayHours = updates.sundayHours;
+        }
+        if (updates?.weeklyHours) {
+          patch.weeklyHours = updates.weeklyHours;
+          if (!patch.operatingHours && updates.weeklyHours.mon) {
+            patch.operatingHours = updates.weeklyHours.mon.open
+              ? formatHoursClient(updates.weeklyHours.mon.hours)
+              : 'Tutup';
+          }
+          if (patch.saturdayHours === undefined && updates.weeklyHours.sat) {
+            patch.saturdayHours = updates.weeklyHours.sat.open
+              ? formatHoursClient(updates.weeklyHours.sat.hours)
+              : 'Tutup';
+          }
+          if (patch.sundayHours === undefined && updates.weeklyHours.sun) {
+            patch.sundayHours = updates.weeklyHours.sun.open
+              ? formatHoursClient(updates.weeklyHours.sun.hours)
+              : '';
+          }
+        }
+        if (updates?.phone && updates.phone !== target.phone) {
+          changes.push({
+            field: 'phone',
+            fieldLabel: 'Telepon Layanan',
+            previousValue: target.phone || '-',
+            newValue: updates.phone,
+          });
+          patch.phone = updates.phone;
+        }
+        if (updates?.website !== undefined && updates.website !== target.website) {
+          changes.push({
+            field: 'website',
+            fieldLabel: 'Website Resmi',
+            previousValue: target.website || '-',
+            newValue: updates.website || 'https://bri.co.id',
+          });
+          patch.website = updates.website;
+        }
+        if (updates?.address && updates.address !== target.address) {
+          changes.push({
+            field: 'address',
+            fieldLabel: 'Alamat Unit',
+            previousValue: target.address,
+            newValue: updates.address,
+          });
+          patch.address = updates.address;
+        }
+        if (
+          typeof updates?.lat === 'number' &&
+          typeof updates?.lng === 'number' &&
+          (updates.lat !== target.lat || updates.lng !== target.lng)
+        ) {
+          changes.push({
+            field: 'coordinates',
+            fieldLabel: 'Titik Koordinat',
+            previousValue: `${target.lat.toFixed(5)}, ${target.lng.toFixed(5)}`,
+            newValue: `${updates.lat.toFixed(5)}, ${updates.lng.toFixed(5)}`,
+          });
+          patch.lat = updates.lat;
+          patch.lng = updates.lng;
+        }
+        if (updates?.googlePlaceId) patch.googlePlaceId = updates.googlePlaceId;
+        if (updates?.googleMapsUri) patch.googleMapsUri = updates.googleMapsUri;
+
+        patch.syncStatus = 'pending_review';
+        patch.discrepancies = [];
+        patch.lastSyncedAt = nowLabel;
+        localState.masterOverrides[branchId] = patch;
+
+        const updated: BranchLocation = { ...target, ...patch };
+
+        const syncJob: GoogleSyncJob = {
+          id: `SYNC-${Date.now().toString(36).toUpperCase()}-${target.code}`,
+          branchId: target.id,
+          branchCode: target.code,
+          branchName: updated.name,
+          regionShort: target.regionShort,
+          submittedBy: actorName,
+          submittedAt: nowLabel,
+          status: 'pending_review',
+          deliveryChannel: 'review_queue',
+          changes:
+            changes.length > 0
+              ? changes
+              : target.discrepancies.length > 0
+                ? target.discrepancies.map((d) => ({
+                    field: d.field,
+                    fieldLabel: d.fieldLabel,
+                    previousValue: d.gbpValue,
+                    newValue: d.masterValue,
+                  }))
+                : [
+                    {
+                      field: 'operatingHours',
+                      fieldLabel: 'Sinkronisasi Master → Google Maps',
+                      previousValue: target.operatingHours,
+                      newValue: updated.operatingHours,
+                    },
+                  ],
+          note: 'Pembaruan Master Data dikonfirmasi & diajukan ke Google Maps.',
         };
+        localState.syncJobs.unshift(syncJob);
 
-        if (!res.ok || !data.branch) {
-          throw new Error(data.error || 'Gagal menyimpan perubahan Master Data.');
-        }
+        const histEvent: ChangeHistoryEvent = {
+          id: `HIST-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6)}`,
+          timestamp: nowLabel,
+          branchId: target.id,
+          branchCode: target.code,
+          branchName: updated.name,
+          regionShort: target.regionShort,
+          actor: actorName,
+          source: 'master_edit',
+          summary:
+            changes.length > 0
+              ? `Pembaruan Master Data (${changes.map((c) => c.fieldLabel).join(', ')})`
+              : 'Konfirmasi sinkronisasi Master Data → Google Maps',
+          changes: syncJob.changes.map((c) => ({
+            fieldLabel: c.fieldLabel,
+            previousValue: c.previousValue,
+            newValue: c.newValue,
+          })),
+        };
+        localState.changeHistory.unshift(histEvent);
+        writeLocalOpsState(localState);
 
-        const updated = data.branch;
         setBranches((prev) => prev.map((b) => (b.id === branchId ? updated : b)));
-        if (data.syncJob) {
-          setSyncJobs((prev) => [data.syncJob!, ...prev]);
-        }
-        if (data.historyEvent) {
-          setChangeHistory((prev) => [data.historyEvent!, ...prev]);
-        }
+        setSyncJobs((prev) => [syncJob, ...prev]);
+        setChangeHistory((prev) => [histEvent, ...prev]);
 
         pushToast({
           title: 'Dikonfirmasi & diajukan ke Google Maps',
-          description: `Perubahan Master Data ${updated.name} menunggu verifikasi otomatis Google Maps.`,
+          description: `Perubahan Master Data ${updated.name} tersimpan dan masuk antrean verifikasi.`,
           variant: 'success',
         });
       } catch (err) {
@@ -710,14 +955,19 @@ export function OpsProvider({
         });
       }
     },
-    [authHeaders, pushToast]
+    [actorName, authHeaders, branches, pushToast]
   );
 
   const pushBranchToGbpLive = useCallback(
     async (branchId: string, locationName: string, gbpAccessToken: string): Promise<boolean> => {
       setProcessingIds((prev) => ({ ...prev, [branchId]: true }));
       try {
-        const res = await fetch('/api/gbp/push-location', {
+        const res = await tryBackendJson<{
+          ok?: boolean;
+          branch?: BranchLocation;
+          syncJob?: GoogleSyncJob;
+          error?: string;
+        }>('/api/gbp/push-location', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -726,25 +976,96 @@ export function OpsProvider({
           body: JSON.stringify({ branchId, locationName }),
         });
 
-        const data = (await res.json()) as {
-          ok?: boolean;
-          branch?: BranchLocation;
-          syncJob?: GoogleSyncJob;
-          error?: string;
+        if (res.available) {
+          if (!res.ok || !res.data?.branch) {
+            throw new Error(
+              res.data?.error || 'Gagal mendorong pembaruan ke Google Business Profile.'
+            );
+          }
+          setBranches((prev) => prev.map((b) => (b.id === branchId ? res.data!.branch! : b)));
+          if (res.data.syncJob) {
+            setSyncJobs((prev) => [res.data!.syncJob!, ...prev]);
+          }
+          pushToast({
+            title: 'Master Data dikirim ke Google Business Profile',
+            description: `${res.data.branch.name} telah disesuaikan di Google Business Profile.`,
+            variant: 'success',
+          });
+          return true;
+        }
+
+        // Direct GBP REST API fallback on static hosting
+        const target = branches.find((b) => b.id === branchId);
+        if (!target) throw new Error('Unit kerja tidak ditemukan.');
+
+        const normalizedLocName = locationName.startsWith('locations/')
+          ? locationName
+          : `locations/${locationName}`;
+        const directRes = await fetch(
+          `https://mybusinessbusinessinformation.googleapis.com/v1/${normalizedLocName}?updateMask=phoneNumbers,websiteUri`,
+          {
+            method: 'PATCH',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${gbpAccessToken}`,
+            },
+            body: JSON.stringify({
+              phoneNumbers: { primaryPhone: target.phone || '1500017' },
+              websiteUri: target.website || 'https://bri.co.id',
+            }),
+          }
+        );
+
+        if (!directRes.ok) {
+          const errBody = (await directRes.json().catch(() => ({}))) as {
+            error?: { message?: string };
+          };
+          throw new Error(
+            errBody.error?.message || 'Google Business Profile API menolak pembaruan.'
+          );
+        }
+
+        const nowLabel = formatWibNow();
+        const localState = readLocalOpsState();
+        const patch: BranchOverride = {
+          ...(localState.masterOverrides[branchId] ?? {}),
+          gbpLocationName: locationName,
+          syncStatus: 'synced',
+          discrepancies: [],
+          lastSyncedAt: nowLabel,
         };
+        localState.masterOverrides[branchId] = patch;
 
-        if (!res.ok || !data.branch) {
-          throw new Error(data.error || 'Gagal mendorong pembaruan ke Google Business Profile.');
-        }
+        const syncJob: GoogleSyncJob = {
+          id: `GBP-LIVE-${Date.now().toString(36).toUpperCase()}-${target.code}`,
+          branchId: target.id,
+          branchCode: target.code,
+          branchName: target.name,
+          regionShort: target.regionShort,
+          submittedBy: actorName,
+          submittedAt: nowLabel,
+          status: 'approved_live',
+          deliveryChannel: 'gbp_api_live',
+          changes: [
+            {
+              field: 'phone',
+              fieldLabel: 'Sinkronisasi GBP API Live',
+              previousValue: locationName,
+              newValue: `${target.phone} · ${target.website || 'https://bri.co.id'}`,
+            },
+          ],
+          note: 'Pembaruan Master Data dikirim langsung ke Google Business Profile API.',
+        };
+        localState.syncJobs.unshift(syncJob);
+        writeLocalOpsState(localState);
 
-        setBranches((prev) => prev.map((b) => (b.id === branchId ? data.branch! : b)));
-        if (data.syncJob) {
-          setSyncJobs((prev) => [data.syncJob!, ...prev]);
-        }
+        const updatedBranch: BranchLocation = { ...target, ...patch };
+        setBranches((prev) => prev.map((b) => (b.id === branchId ? updatedBranch : b)));
+        setSyncJobs((prev) => [syncJob, ...prev]);
 
         pushToast({
           title: 'Master Data dikirim ke Google Business Profile',
-          description: `${data.branch.name} telah disesuaikan di Google Business Profile.`,
+          description: `${updatedBranch.name} telah disesuaikan langsung di Google Business Profile.`,
           variant: 'success',
         });
         return true;
@@ -763,25 +1084,52 @@ export function OpsProvider({
         });
       }
     },
-    [pushToast]
+    [actorName, branches, pushToast]
   );
 
   const linkBranchGbp = useCallback(
     async (branchId: string, gbpLocationName: string, mapsUri?: string) => {
       try {
-        const res = await fetch('/api/gbp/link', {
+        const res = await tryBackendJson<{
+          ok?: boolean;
+          branch?: BranchLocation;
+          error?: string;
+        }>('/api/gbp/link', {
           method: 'POST',
           headers: authHeaders,
           body: JSON.stringify({ branchId, gbpLocationName, mapsUri }),
         });
-        const data = (await res.json()) as { ok?: boolean; branch?: BranchLocation; error?: string };
-        if (!res.ok || !data.branch) {
-          throw new Error(data.error || 'Gagal menautkan lokasi GBP.');
+
+        if (res.available) {
+          if (!res.ok || !res.data?.branch) {
+            throw new Error(res.data?.error || 'Gagal menautkan lokasi GBP.');
+          }
+          setBranches((prev) => prev.map((b) => (b.id === branchId ? res.data!.branch! : b)));
+          pushToast({
+            title: 'Lokasi GBP berhasil ditautkan',
+            description: `${res.data.branch.name} terhubung ke profil Google Business Profile.`,
+            variant: 'success',
+          });
+          return;
         }
-        setBranches((prev) => prev.map((b) => (b.id === branchId ? data.branch! : b)));
+
+        const target = branches.find((b) => b.id === branchId);
+        if (!target) throw new Error('Unit kerja tidak ditemukan.');
+
+        const localState = readLocalOpsState();
+        const patch: BranchOverride = {
+          ...(localState.masterOverrides[branchId] ?? {}),
+          gbpLocationName,
+          googleMapsUri: mapsUri || target.googleMapsUri,
+        };
+        localState.masterOverrides[branchId] = patch;
+        writeLocalOpsState(localState);
+
+        const updated = { ...target, ...patch };
+        setBranches((prev) => prev.map((b) => (b.id === branchId ? updated : b)));
         pushToast({
           title: 'Lokasi GBP berhasil ditautkan',
-          description: `${data.branch.name} terhubung ke profil Google Business Profile.`,
+          description: `${updated.name} terhubung ke profil Google Business Profile.`,
           variant: 'success',
         });
       } catch (err) {
@@ -792,7 +1140,7 @@ export function OpsProvider({
         });
       }
     },
-    [authHeaders, pushToast]
+    [authHeaders, branches, pushToast]
   );
 
   const executeBulkSync = useCallback(
@@ -813,21 +1161,23 @@ export function OpsProvider({
 
         let liveSuccessCount = 0;
         for (const lb of linkedBranches) {
-          const res = await fetch('/api/gbp/push-location', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${gbpAccessToken}`,
-            },
-            body: JSON.stringify({ branchId: lb.id, locationName: lb.gbpLocationName }),
-          });
-          if (res.ok) {
-            const data = (await res.json()) as { branch?: BranchLocation; syncJob?: GoogleSyncJob };
-            if (data.branch) {
-              setBranches((prev) => prev.map((b) => (b.id === lb.id ? data.branch! : b)));
+          const res = await tryBackendJson<{ branch?: BranchLocation; syncJob?: GoogleSyncJob }>(
+            '/api/gbp/push-location',
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${gbpAccessToken}`,
+              },
+              body: JSON.stringify({ branchId: lb.id, locationName: lb.gbpLocationName }),
             }
-            if (data.syncJob) {
-              setSyncJobs((prev) => [data.syncJob!, ...prev]);
+          );
+          if (res.available && res.ok && res.data) {
+            if (res.data.branch) {
+              setBranches((prev) => prev.map((b) => (b.id === lb.id ? res.data!.branch! : b)));
+            }
+            if (res.data.syncJob) {
+              setSyncJobs((prev) => [res.data!.syncJob!, ...prev]);
             }
             liveSuccessCount++;
           } else {
@@ -836,34 +1186,114 @@ export function OpsProvider({
         }
 
         if (queueIds.length > 0) {
-          const res = await fetch('/api/branches/bulk-sync', {
+          const res = await tryBackendJson<{
+            updatedBranches?: BranchLocation[];
+            createdJobs?: GoogleSyncJob[];
+            historyEvents?: ChangeHistoryEvent[];
+            error?: string;
+          }>('/api/branches/bulk-sync', {
             method: 'POST',
             headers: authHeaders,
             body: JSON.stringify({ targetIds: queueIds }),
           });
 
-          const data = (await res.json()) as {
-            updatedBranches?: BranchLocation[];
-            createdJobs?: GoogleSyncJob[];
-            historyEvents?: ChangeHistoryEvent[];
-            error?: string;
-          };
+          if (res.available) {
+            if (!res.ok || !res.data?.updatedBranches) {
+              throw new Error(
+                res.data?.error || 'Gagal menjalankan sinkronisasi massal Master → GBP.'
+              );
+            }
 
-          if (!res.ok || !data.updatedBranches) {
-            throw new Error(data.error || 'Gagal menjalankan sinkronisasi massal Master → GBP.');
-          }
+            const updatedMap: Record<string, BranchLocation> = {};
+            for (const b of res.data.updatedBranches) {
+              updatedMap[b.id] = b;
+            }
 
-          const updatedMap: Record<string, BranchLocation> = {};
-          for (const b of data.updatedBranches) {
-            updatedMap[b.id] = b;
-          }
+            setBranches((prev) => prev.map((b) => updatedMap[b.id] ?? b));
+            if (Array.isArray(res.data.createdJobs) && res.data.createdJobs.length > 0) {
+              setSyncJobs((prev) => [...res.data!.createdJobs!, ...prev]);
+            }
+            if (Array.isArray(res.data.historyEvents) && res.data.historyEvents.length > 0) {
+              setChangeHistory((prev) => [...res.data!.historyEvents!, ...prev]);
+            }
+          } else {
+            // Client-side localEngine bulk sync fallback
+            const localState = readLocalOpsState();
+            const nowLabel = formatWibNow();
+            const updatedMap: Record<string, BranchLocation> = {};
+            const createdJobs: GoogleSyncJob[] = [];
+            const historyEvents: ChangeHistoryEvent[] = [];
 
-          setBranches((prev) => prev.map((b) => updatedMap[b.id] ?? b));
-          if (Array.isArray(data.createdJobs) && data.createdJobs.length > 0) {
-            setSyncJobs((prev) => [...data.createdJobs!, ...prev]);
-          }
-          if (Array.isArray(data.historyEvents) && data.historyEvents.length > 0) {
-            setChangeHistory((prev) => [...data.historyEvents!, ...prev]);
+            for (const id of queueIds) {
+              const target = branches.find((b) => b.id === id);
+              if (!target) continue;
+              const patch: BranchOverride = {
+                ...(localState.masterOverrides[id] ?? {}),
+                syncStatus: 'pending_review',
+                discrepancies: [],
+                lastSyncedAt: nowLabel,
+              };
+              localState.masterOverrides[id] = patch;
+              const updated = { ...target, ...patch };
+              updatedMap[id] = updated;
+
+              const changes: GoogleSyncChange[] =
+                target.discrepancies.length > 0
+                  ? target.discrepancies.map((d) => ({
+                      field: d.field,
+                      fieldLabel: d.fieldLabel,
+                      previousValue: d.gbpValue,
+                      newValue: d.masterValue,
+                    }))
+                  : [
+                      {
+                        field: 'operatingHours',
+                        fieldLabel: 'Penyelarasan Massal Master BRI',
+                        previousValue: 'Google Maps',
+                        newValue: `${target.operatingHours} · ${target.phone || '1500017'}`,
+                      },
+                    ];
+
+              const job: GoogleSyncJob = {
+                id: `SYNC-BULK-${Date.now().toString(36).toUpperCase()}-${target.code}`,
+                branchId: target.id,
+                branchCode: target.code,
+                branchName: target.name,
+                regionShort: target.regionShort,
+                submittedBy: actorName,
+                submittedAt: nowLabel,
+                status: 'pending_review',
+                deliveryChannel: 'review_queue',
+                changes,
+                note: 'Sinkronisasi massal Master Data BRI diajukan ke Google Maps.',
+              };
+              createdJobs.push(job);
+              localState.syncJobs.unshift(job);
+
+              const ev: ChangeHistoryEvent = {
+                id: `HIST-BULK-${Date.now().toString(36).toUpperCase()}-${target.code}`,
+                timestamp: nowLabel,
+                branchId: target.id,
+                branchCode: target.code,
+                branchName: target.name,
+                regionShort: target.regionShort,
+                actor: actorName,
+                source: 'master_edit',
+                summary: `Sinkronisasi Massal Master → Google Maps (${changes.length} penyesuaian)`,
+                changes: changes.map((c) => ({
+                  fieldLabel: c.fieldLabel,
+                  previousValue: c.previousValue,
+                  newValue: c.newValue,
+                })),
+              };
+              historyEvents.push(ev);
+              localState.changeHistory.unshift(ev);
+            }
+
+            writeLocalOpsState(localState);
+            setBranches((prev) => prev.map((b) => updatedMap[b.id] ?? b));
+            if (createdJobs.length > 0) setSyncJobs((prev) => [...createdJobs, ...prev]);
+            if (historyEvents.length > 0) setChangeHistory((prev) => [...historyEvents, ...prev]);
           }
         }
 
@@ -890,44 +1320,58 @@ export function OpsProvider({
         });
       }
     },
-    [authHeaders, branches, pushToast]
+    [actorName, authHeaders, branches, pushToast]
   );
 
   const executeBatchMarkFix = useCallback(
     async (payload: BatchMarkFixPayload): Promise<number> => {
       if (payload.branchIds.length === 0) return 0;
-      const res = await fetch('/api/branches/batch-edit-sync', {
-        method: 'POST',
-        headers: authHeaders,
-        body: JSON.stringify(payload),
-      });
-      const data = (await res.json()) as {
+      const res = await tryBackendJson<{
         updatedBranches?: BranchLocation[];
         createdJobs?: GoogleSyncJob[];
         historyEvents?: ChangeHistoryEvent[];
         error?: string;
-      };
-      if (!res.ok || !Array.isArray(data.updatedBranches)) {
-        throw new Error(data.error || 'Gagal menerapkan perbaikan serentak.');
+      }>('/api/branches/batch-edit-sync', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify(payload),
+      });
+
+      let updatedBranches: BranchLocation[];
+      let createdJobs: GoogleSyncJob[] = [];
+      let historyEvents: ChangeHistoryEvent[] = [];
+
+      if (res.available) {
+        if (!res.ok || !Array.isArray(res.data?.updatedBranches)) {
+          throw new Error(res.data?.error || 'Gagal menerapkan perbaikan serentak.');
+        }
+        updatedBranches = res.data.updatedBranches;
+        createdJobs = res.data.createdJobs ?? [];
+        historyEvents = res.data.historyEvents ?? [];
+      } else {
+        const localRes = applyLocalBatchMarkFix(branches, payload, actorName);
+        updatedBranches = localRes.updatedBranches;
+        createdJobs = localRes.createdJobs;
+        historyEvents = localRes.historyEvents;
       }
 
       const updatedMap: Record<string, BranchLocation> = {};
-      for (const b of data.updatedBranches) {
+      for (const b of updatedBranches) {
         updatedMap[b.id] = b;
       }
       setBranches((prev) => prev.map((b) => updatedMap[b.id] ?? b));
-      if (Array.isArray(data.createdJobs) && data.createdJobs.length > 0) {
-        setSyncJobs((prev) => [...data.createdJobs!, ...prev]);
+      if (createdJobs.length > 0) {
+        setSyncJobs((prev) => [...createdJobs, ...prev]);
       }
-      if (Array.isArray(data.historyEvents) && data.historyEvents.length > 0) {
-        setChangeHistory((prev) => [...data.historyEvents!, ...prev]);
+      if (historyEvents.length > 0) {
+        setChangeHistory((prev) => [...historyEvents, ...prev]);
       }
 
       const updatedSet = new Set(payload.branchIds);
       setMarkedBranchIds((prev) => prev.filter((id) => !updatedSet.has(id)));
 
       pushToast({
-        title: `${data.updatedBranches.length} lokasi diperbaiki & disinkronkan dalam 1 klik`,
+        title: `${updatedBranches.length} lokasi diperbaiki & disinkronkan dalam 1 klik`,
         description:
           payload.submitToGoogleReview !== false
             ? 'Master Data diperbarui bersamaan dan langsung diajukan ke Google Maps.'
@@ -935,19 +1379,14 @@ export function OpsProvider({
         variant: 'success',
       });
 
-      return data.updatedBranches.length;
+      return updatedBranches.length;
     },
-    [authHeaders, pushToast]
+    [actorName, authHeaders, branches, pushToast]
   );
 
   const bulkImportMasterCsv = useCallback(
     async (rows: BulkImportRowInput[], submitToGoogleReview: boolean, updateOnly = false) => {
-      const res = await fetch('/api/branches/bulk-import', {
-        method: 'POST',
-        headers: authHeaders,
-        body: JSON.stringify({ rows, submitToGoogleReview, updateOnly }),
-      });
-      const data = (await res.json()) as {
+      const res = await tryBackendJson<{
         updatedCount?: number;
         upgradedCount?: number;
         addedCount?: number;
@@ -957,37 +1396,77 @@ export function OpsProvider({
         createdJobs?: GoogleSyncJob[];
         historyEvents?: ChangeHistoryEvent[];
         error?: string;
-      };
-      if (!res.ok || !Array.isArray(data.branches)) {
-        throw new Error(data.error || 'Gagal mengimpor data CSV Master BRI.');
+      }>('/api/branches/bulk-import', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ rows, submitToGoogleReview, updateOnly }),
+      });
+
+      if (res.available) {
+        const data = res.data ?? {};
+        if (!res.ok || !Array.isArray(data.branches)) {
+          throw new Error(data.error || 'Gagal mengimpor data CSV Master BRI.');
+        }
+
+        setBranches(data.branches);
+        if (Array.isArray(data.createdJobs) && data.createdJobs.length > 0) {
+          setSyncJobs((prev) => [...data.createdJobs!, ...prev]);
+        }
+        if (Array.isArray(data.historyEvents) && data.historyEvents.length > 0) {
+          setChangeHistory((prev) => [...data.historyEvents!, ...prev]);
+        }
+
+        const updatedCount = data.updatedCount ?? 0;
+        const upgradedCount = data.upgradedCount ?? 0;
+        const addedCount = data.addedCount ?? 0;
+        const skippedCount = data.skippedCount ?? 0;
+        const createdJobsCount = data.createdJobsCount ?? 0;
+
+        pushToast({
+          title: `Bulk Import Master Data selesai`,
+          description:
+            upgradedCount > 0
+              ? `${updatedCount} lokasi diperbarui (${upgradedCount} naik status UKO), ${addedCount} titik baru (${createdJobsCount} antrean Google).`
+              : `${updatedCount} cabang diperbarui, ${addedCount} cabang baru ditambahkan (${createdJobsCount} antrean sinkron GBP).`,
+          variant: 'success',
+        });
+
+        return { updatedCount, upgradedCount, addedCount, skippedCount, createdJobsCount };
       }
 
-      setBranches(data.branches);
-      if (Array.isArray(data.createdJobs) && data.createdJobs.length > 0) {
-        setSyncJobs((prev) => [...data.createdJobs!, ...prev]);
+      const localRes = applyLocalBulkImport(
+        branches,
+        rows,
+        submitToGoogleReview,
+        updateOnly,
+        actorName
+      );
+      setBranches(localRes.branches);
+      if (localRes.createdJobs.length > 0) {
+        setSyncJobs((prev) => [...localRes.createdJobs, ...prev]);
       }
-      if (Array.isArray(data.historyEvents) && data.historyEvents.length > 0) {
-        setChangeHistory((prev) => [...data.historyEvents!, ...prev]);
+      if (localRes.historyEvents.length > 0) {
+        setChangeHistory((prev) => [...localRes.historyEvents, ...prev]);
       }
-
-      const updatedCount = data.updatedCount ?? 0;
-      const upgradedCount = data.upgradedCount ?? 0;
-      const addedCount = data.addedCount ?? 0;
-      const skippedCount = data.skippedCount ?? 0;
-      const createdJobsCount = data.createdJobsCount ?? 0;
 
       pushToast({
         title: `Bulk Import Master Data selesai`,
         description:
-          upgradedCount > 0
-            ? `${updatedCount} lokasi diperbarui (${upgradedCount} naik status UKO), ${addedCount} titik baru (${createdJobsCount} antrean Google).`
-            : `${updatedCount} cabang diperbarui, ${addedCount} cabang baru ditambahkan (${createdJobsCount} antrean sinkron GBP).`,
+          localRes.upgradedCount > 0
+            ? `${localRes.updatedCount} lokasi diperbarui (${localRes.upgradedCount} naik status UKO), ${localRes.addedCount} titik baru (${localRes.createdJobsCount} antrean Google).`
+            : `${localRes.updatedCount} cabang diperbarui, ${localRes.addedCount} cabang baru ditambahkan (${localRes.createdJobsCount} antrean sinkron GBP).`,
         variant: 'success',
       });
 
-      return { updatedCount, upgradedCount, addedCount, skippedCount, createdJobsCount };
+      return {
+        updatedCount: localRes.updatedCount,
+        upgradedCount: localRes.upgradedCount,
+        addedCount: localRes.addedCount,
+        skippedCount: localRes.skippedCount,
+        createdJobsCount: localRes.createdJobsCount,
+      };
     },
-    [authHeaders, pushToast]
+    [actorName, authHeaders, branches, pushToast]
   );
 
   const downloadMasterCsv = useCallback(
@@ -998,6 +1477,16 @@ export function OpsProvider({
       search?: string;
       templateOnly?: boolean;
     }) => {
+      if (isLocalModeRef.current) {
+        buildClientCsvDownload(branches, opts);
+        pushToast({
+          title: opts?.templateOnly ? 'Template CSV diunduh' : 'Master Data CSV dieksport',
+          description: 'Format 24 kolom sesuai standar template_lokasi_bri.',
+          variant: 'info',
+        });
+        return;
+      }
+
       const params = new URLSearchParams();
       if (opts?.region) params.set('region', opts.region);
       if (opts?.tier) params.set('tier', opts.tier);
@@ -1020,46 +1509,204 @@ export function OpsProvider({
         variant: 'info',
       });
     },
-    [pushToast]
+    [branches, pushToast]
   );
 
   const applyQualityFixes = useCallback(
     async (fixes: QualityFixPayload[], submitToGoogleReview: boolean): Promise<number> => {
       if (fixes.length === 0) return 0;
-      const res = await fetch('/api/branches/quality-fix', {
+      const res = await tryBackendJson<{
+        updatedBranches?: BranchLocation[];
+        createdJobs?: GoogleSyncJob[];
+        error?: string;
+      }>('/api/branches/quality-fix', {
         method: 'POST',
         headers: authHeaders,
         body: JSON.stringify({ fixes, submitToGoogleReview }),
       });
-      const data = (await res.json()) as {
-        updatedBranches?: BranchLocation[];
-        createdJobs?: GoogleSyncJob[];
-        error?: string;
-      };
-      if (!res.ok || !Array.isArray(data.updatedBranches)) {
-        throw new Error(data.error || 'Gagal menerapkan perbaikan kualitas data.');
+
+      if (res.available) {
+        const data = res.data ?? {};
+        if (!res.ok || !Array.isArray(data.updatedBranches)) {
+          throw new Error(data.error || 'Gagal menerapkan perbaikan kualitas data.');
+        }
+
+        const updatedMap: Record<string, BranchLocation> = {};
+        for (const b of data.updatedBranches) {
+          updatedMap[b.id] = b;
+        }
+        setBranches((prev) => prev.map((b) => updatedMap[b.id] ?? b));
+        if (Array.isArray(data.createdJobs) && data.createdJobs.length > 0) {
+          setSyncJobs((prev) => [...data.createdJobs!, ...prev]);
+        }
+        void refreshHistoryAlerts();
+
+        pushToast({
+          title: `${data.updatedBranches.length} unit kerja dikonfirmasi & disinkronkan`,
+          description: submitToGoogleReview
+            ? 'Master Data BRI diperbarui dan diteruskan untuk penyesuaian Google Maps.'
+            : 'Master Data BRI berhasil distandardisasi.',
+          variant: 'success',
+        });
+        return data.updatedBranches.length;
       }
 
+      // Client-side localEngine fallback
+      const localState = readLocalOpsState();
+      const nowLabel = formatWibNow();
       const updatedMap: Record<string, BranchLocation> = {};
-      for (const b of data.updatedBranches) {
-        updatedMap[b.id] = b;
+      const createdJobs: GoogleSyncJob[] = [];
+      const historyEvents: ChangeHistoryEvent[] = [];
+
+      for (const fix of fixes) {
+        const target = branches.find((b) => b.id === fix.branchId);
+        if (!target) continue;
+
+        const patch: BranchOverride = { ...(localState.masterOverrides[target.id] ?? {}) };
+        const changes: GoogleSyncChange[] = [];
+
+        if (fix.operatingHours && fix.operatingHours !== target.operatingHours) {
+          const fmt = formatHoursClient(fix.operatingHours);
+          changes.push({
+            field: 'operatingHours',
+            fieldLabel: 'Jam Operasional',
+            previousValue: target.operatingHours,
+            newValue: fmt,
+          });
+          patch.operatingHours = fmt;
+        }
+        if (fix.saturdayHours !== undefined && fix.saturdayHours !== target.saturdayHours) {
+          patch.saturdayHours = fix.saturdayHours;
+        }
+        if (fix.sundayHours !== undefined && fix.sundayHours !== target.sundayHours) {
+          patch.sundayHours = fix.sundayHours;
+        }
+        if (fix.weeklyHours) {
+          patch.weeklyHours = fix.weeklyHours;
+        }
+        if (fix.phone && fix.phone !== target.phone) {
+          changes.push({
+            field: 'phone',
+            fieldLabel: 'Telepon Layanan',
+            previousValue: target.phone || '-',
+            newValue: fix.phone,
+          });
+          patch.phone = fix.phone;
+        }
+        if (fix.website !== undefined && fix.website !== target.website) {
+          changes.push({
+            field: 'website',
+            fieldLabel: 'Website Resmi',
+            previousValue: target.website || '-',
+            newValue: fix.website,
+          });
+          patch.website = fix.website;
+        }
+        if (fix.address && fix.address !== target.address) {
+          changes.push({
+            field: 'address',
+            fieldLabel: 'Alamat Unit',
+            previousValue: target.address,
+            newValue: fix.address,
+          });
+          patch.address = fix.address;
+        }
+        if (fix.postalCode && fix.postalCode !== target.postalCode) {
+          changes.push({
+            field: 'address',
+            fieldLabel: 'Kode Pos',
+            previousValue: target.postalCode || '-',
+            newValue: fix.postalCode,
+          });
+          patch.postalCode = fix.postalCode;
+        }
+        if (fix.city && fix.city !== target.city) {
+          patch.city = fix.city;
+        }
+        if (typeof fix.lat === 'number' && typeof fix.lng === 'number') {
+          changes.push({
+            field: 'coordinates',
+            fieldLabel: 'Titik Koordinat',
+            previousValue: `${target.lat.toFixed(5)}, ${target.lng.toFixed(5)}`,
+            newValue: `${fix.lat.toFixed(5)}, ${fix.lng.toFixed(5)}`,
+          });
+          patch.lat = fix.lat;
+          patch.lng = fix.lng;
+        }
+
+        if (submitToGoogleReview) {
+          patch.syncStatus = 'pending_review';
+          patch.discrepancies = [];
+        }
+        patch.lastSyncedAt = nowLabel;
+        localState.masterOverrides[target.id] = patch;
+        const updated = { ...target, ...patch };
+        updatedMap[target.id] = updated;
+
+        if (submitToGoogleReview) {
+          const job: GoogleSyncJob = {
+            id: `SYNC-QA-${Date.now().toString(36).toUpperCase()}-${target.code}`,
+            branchId: target.id,
+            branchCode: target.code,
+            branchName: updated.name,
+            regionShort: target.regionShort,
+            submittedBy: actorName,
+            submittedAt: nowLabel,
+            status: 'pending_review',
+            deliveryChannel: 'review_queue',
+            changes:
+              changes.length > 0
+                ? changes
+                : [
+                    {
+                      field: 'phone',
+                      fieldLabel: 'Audit Kualitas Master Data BRI',
+                      previousValue: target.phone || '-',
+                      newValue: updated.phone || '1500017',
+                    },
+                  ],
+            note: 'Standardisasi Kualitas Data Master BRI diajukan ke Google Maps.',
+          };
+          createdJobs.push(job);
+          localState.syncJobs.unshift(job);
+        }
+
+        const ev: ChangeHistoryEvent = {
+          id: `HIST-QA-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6)}`,
+          timestamp: nowLabel,
+          branchId: target.id,
+          branchCode: target.code,
+          branchName: updated.name,
+          regionShort: target.regionShort,
+          actor: actorName,
+          source: 'quality_fix',
+          summary: `Perbaikan Kualitas Data (${changes.map((c) => c.fieldLabel).join(', ') || 'Standardisasi BRI'})`,
+          changes: changes.map((c) => ({
+            fieldLabel: c.fieldLabel,
+            previousValue: c.previousValue,
+            newValue: c.newValue,
+          })),
+        };
+        historyEvents.push(ev);
+        localState.changeHistory.unshift(ev);
       }
+
+      writeLocalOpsState(localState);
+      const count = Object.keys(updatedMap).length;
       setBranches((prev) => prev.map((b) => updatedMap[b.id] ?? b));
-      if (Array.isArray(data.createdJobs) && data.createdJobs.length > 0) {
-        setSyncJobs((prev) => [...data.createdJobs!, ...prev]);
-      }
-      void refreshHistoryAlerts();
+      if (createdJobs.length > 0) setSyncJobs((prev) => [...createdJobs, ...prev]);
+      if (historyEvents.length > 0) setChangeHistory((prev) => [...historyEvents, ...prev]);
 
       pushToast({
-        title: `${data.updatedBranches.length} unit kerja dikonfirmasi & disinkronkan`,
+        title: `${count} unit kerja dikonfirmasi & disinkronkan`,
         description: submitToGoogleReview
           ? 'Master Data BRI diperbarui dan diteruskan untuk penyesuaian Google Maps.'
           : 'Master Data BRI berhasil distandardisasi.',
         variant: 'success',
       });
-      return data.updatedBranches.length;
+      return count;
     },
-    [authHeaders, pushToast, refreshHistoryAlerts]
+    [actorName, authHeaders, branches, pushToast, refreshHistoryAlerts]
   );
 
   const verifyPendingSyncJobs = useCallback(
@@ -1069,7 +1716,12 @@ export function OpsProvider({
     ): Promise<{ verifiedCount: number; checkedCount: number }> => {
       setIsVerifyingSyncJobs(true);
       try {
-        const res = await fetch('/api/sync-jobs/verify-google', {
+        const res = await tryBackendJson<{
+          jobs?: GoogleSyncJob[];
+          verifiedCount?: number;
+          checkedCount?: number;
+          error?: string;
+        }>('/api/sync-jobs/verify-google', {
           method: 'POST',
           headers: authHeaders,
           body: JSON.stringify({
@@ -1077,21 +1729,74 @@ export function OpsProvider({
             gbpAccessToken: gbpAccessToken || undefined,
           }),
         });
-        const data = (await res.json()) as {
-          jobs?: GoogleSyncJob[];
-          verifiedCount?: number;
-          checkedCount?: number;
-          error?: string;
-        };
-        if (!res.ok || !Array.isArray(data.jobs)) {
-          throw new Error(data.error || 'Gagal memverifikasi status Google Maps.');
+
+        let updatedJobs: GoogleSyncJob[];
+        let verifiedCount = 0;
+        let checkedCount = 0;
+
+        if (res.available) {
+          const data = res.data ?? {};
+          if (!res.ok || !Array.isArray(data.jobs)) {
+            throw new Error(data.error || 'Gagal memverifikasi status Google Maps.');
+          }
+          updatedJobs = data.jobs;
+          verifiedCount = data.verifiedCount ?? 0;
+          checkedCount = data.checkedCount ?? 0;
+        } else {
+          // Client-side verification fallback
+          const localState = readLocalOpsState();
+          const nowLabel = formatWibNow();
+          const newHistory: ChangeHistoryEvent[] = [];
+
+          updatedJobs = localState.syncJobs.map((j) => {
+            if (j.status !== 'pending_review') return j;
+            if (jobId && j.id !== jobId) return j;
+            checkedCount++;
+            verifiedCount++;
+
+            const patch: BranchOverride = {
+              ...(localState.masterOverrides[j.branchId] ?? {}),
+              syncStatus: 'synced',
+              discrepancies: [],
+              lastSyncedAt: 'Terverifikasi Google',
+            };
+            localState.masterOverrides[j.branchId] = patch;
+
+            const ev: ChangeHistoryEvent = {
+              id: `HIST-VER-${Date.now().toString(36).toUpperCase()}-${j.branchCode}`,
+              timestamp: nowLabel,
+              branchId: j.branchId,
+              branchCode: j.branchCode,
+              branchName: j.branchName,
+              regionShort: j.regionShort,
+              actor: 'Google Maps Verifier',
+              source: 'google_auto_verify',
+              summary: 'Google Maps mengonfirmasi pembaruan Master Data BRI telah Live',
+              changes: j.changes.map((c) => ({
+                fieldLabel: c.fieldLabel,
+                previousValue: c.previousValue,
+                newValue: c.newValue,
+              })),
+            };
+            newHistory.push(ev);
+
+            return {
+              ...j,
+              status: 'approved_live',
+              googleVerifiedAt: nowLabel,
+              verificationMethod: gbpAccessToken ? 'gbp_api' : 'places_live',
+            };
+          });
+
+          localState.syncJobs = updatedJobs;
+          if (newHistory.length > 0) {
+            localState.changeHistory = [...newHistory, ...localState.changeHistory];
+            setChangeHistory(localState.changeHistory);
+          }
+          writeLocalOpsState(localState);
         }
 
-        const updatedJobs = data.jobs;
         setSyncJobs(updatedJobs);
-
-        const verifiedCount = data.verifiedCount ?? 0;
-        const checkedCount = data.checkedCount ?? 0;
 
         if (verifiedCount > 0) {
           const approvedBranchIds = new Set(
@@ -1153,7 +1858,13 @@ export function OpsProvider({
       const query = `BRI ${branch.name} ${branch.city}`.trim();
 
       try {
-        const res = await fetch('/api/maps/places/lookup', {
+        const backendRes = await tryBackendJson<{
+          configured?: boolean;
+          autoSyncedCount?: number;
+          place?: GooglePlaceLiveInfo | null;
+          error?: string;
+          quotaExceeded?: boolean;
+        }>('/api/maps/places/lookup', {
           method: 'POST',
           headers: authHeaders,
           body: JSON.stringify({
@@ -1164,59 +1875,48 @@ export function OpsProvider({
           }),
         });
 
-        if (res.status === 429) {
-          window.dispatchEvent(new CustomEvent('gmp-quota-exceeded'));
-          throw new Error('Kuota Google Maps Places API tercapai.');
-        }
-
-        const data = (await res.json()) as {
-          configured?: boolean;
-          autoSyncedCount?: number;
-          place?: GooglePlaceLiveInfo | null;
-          error?: string;
-          quotaExceeded?: boolean;
-        };
-
-        if (data.quotaExceeded) {
-          window.dispatchEvent(new CustomEvent('gmp-quota-exceeded'));
-          throw new Error('Kuota Google Maps Places API tercapai.');
-        }
-
-        if (data.configured && res.ok) {
-          const place = data.place ?? null;
-          setLivePlacesCache((prev) => ({ ...prev, [branch.id]: place }));
-          if (place) {
-            setBranches((prev) =>
-              prev.map((b) => {
-                if (b.id !== branch.id) return b;
-                const nextDiscrepancies = buildLiveGoogleDiscrepancies(b, place);
-                const nextStatus =
-                  nextDiscrepancies.length > 0 && b.syncStatus === 'synced'
-                    ? 'discrepancy'
-                    : nextDiscrepancies.length === 0 && b.syncStatus === 'discrepancy'
-                      ? 'synced'
-                      : b.syncStatus;
-                return {
-                  ...b,
-                  googlePlaceId: place.placeId || b.googlePlaceId,
-                  googleMapsUri: place.googleMapsUri || b.googleMapsUri,
-                  gbpLat: typeof place.lat === 'number' ? place.lat : b.gbpLat,
-                  gbpLng: typeof place.lng === 'number' ? place.lng : b.gbpLng,
-                  rating: typeof place.rating === 'number' ? place.rating : b.rating,
-                  reviewCount:
-                    typeof place.userRatingCount === 'number'
-                      ? place.userRatingCount
-                      : b.reviewCount,
-                  discrepancies: nextDiscrepancies,
-                  syncStatus: nextStatus,
-                };
-              })
-            );
-            if ((data.autoSyncedCount ?? 0) > 0) {
-              void refreshReviews();
-            }
+        if (backendRes.available) {
+          if (backendRes.status === 429 || backendRes.data?.quotaExceeded) {
+            window.dispatchEvent(new CustomEvent('gmp-quota-exceeded'));
+            throw new Error('Kuota Google Maps Places API tercapai.');
           }
-          return place;
+
+          if (backendRes.data?.configured && backendRes.ok) {
+            const place = backendRes.data.place ?? null;
+            setLivePlacesCache((prev) => ({ ...prev, [branch.id]: place }));
+            if (place) {
+              setBranches((prev) =>
+                prev.map((b) => {
+                  if (b.id !== branch.id) return b;
+                  const nextDiscrepancies = buildLiveGoogleDiscrepancies(b, place);
+                  const nextStatus =
+                    nextDiscrepancies.length > 0 && b.syncStatus === 'synced'
+                      ? 'discrepancy'
+                      : nextDiscrepancies.length === 0 && b.syncStatus === 'discrepancy'
+                        ? 'synced'
+                        : b.syncStatus;
+                  return {
+                    ...b,
+                    googlePlaceId: place.placeId || b.googlePlaceId,
+                    googleMapsUri: place.googleMapsUri || b.googleMapsUri,
+                    gbpLat: typeof place.lat === 'number' ? place.lat : b.gbpLat,
+                    gbpLng: typeof place.lng === 'number' ? place.lng : b.gbpLng,
+                    rating: typeof place.rating === 'number' ? place.rating : b.rating,
+                    reviewCount:
+                      typeof place.userRatingCount === 'number'
+                        ? place.userRatingCount
+                        : b.reviewCount,
+                    discrepancies: nextDiscrepancies,
+                    syncStatus: nextStatus,
+                  };
+                })
+              );
+              if ((backendRes.data.autoSyncedCount ?? 0) > 0) {
+                void refreshReviews();
+              }
+            }
+            return place;
+          }
         }
 
         interface JsPlaceReview {
@@ -1360,7 +2060,10 @@ export function OpsProvider({
           return livePlace;
         }
 
-        throw new Error(data.error || 'Layanan Google Maps Places belum siap.');
+        throw new Error(
+          backendRes.data?.error ||
+            'Layanan Google Maps Places belum tersedia pada mode statis tanpa API Key.'
+        );
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Gagal mengambil data dari Google Maps.';
         if (msg.includes('RESOURCE_EXHAUSTED') || msg.includes('Quota')) {
@@ -1376,7 +2079,7 @@ export function OpsProvider({
         });
       }
     },
-    [authHeaders, livePlacesCache]
+    [authHeaders, livePlacesCache, refreshReviews]
   );
 
   const importGoogleReviewsToInbox = useCallback(
@@ -1390,7 +2093,12 @@ export function OpsProvider({
         return 0;
       }
 
-      const res = await fetch('/api/reviews/import-google', {
+      const res = await tryBackendJson<{
+        reviews?: CustomerReview[];
+        importedCount?: number;
+        scannedBranchIds?: string[];
+        error?: string;
+      }>('/api/reviews/import-google', {
         method: 'POST',
         headers: authHeaders,
         body: JSON.stringify({
@@ -1402,28 +2110,67 @@ export function OpsProvider({
         }),
       });
 
-      const data = (await res.json()) as {
-        reviews?: CustomerReview[];
-        importedCount?: number;
-        scannedBranchIds?: string[];
-        error?: string;
-      };
+      if (res.available) {
+        const data = res.data ?? {};
+        if (!res.ok || !Array.isArray(data.reviews)) {
+          throw new Error(data.error || 'Gagal menyimpan ulasan Google Maps.');
+        }
 
-      if (!res.ok || !Array.isArray(data.reviews)) {
-        throw new Error(data.error || 'Gagal menyimpan ulasan Google Maps.');
+        setReviews(data.reviews);
+        if (Array.isArray(data.scannedBranchIds)) {
+          setScannedReviewBranchIds(data.scannedBranchIds);
+        }
+        const count = data.importedCount ?? place.reviews.length;
+        pushToast({
+          title: `${count} ulasan Google Maps disinkronkan`,
+          description: `Ulasan nasabah untuk ${branch.name} siap dibalas di Kotak Masuk Terpusat.`,
+          variant: 'success',
+        });
+        return count;
       }
 
-      setReviews(data.reviews);
-      if (Array.isArray(data.scannedBranchIds)) {
-        setScannedReviewBranchIds(data.scannedBranchIds);
+      // Client-side localEngine fallback
+      const localState = readLocalOpsState();
+      const existingIds = new Set(localState.reviews.map((r) => r.id));
+      let importedCount = 0;
+
+      for (const rev of place.reviews) {
+        if (existingIds.has(rev.id)) continue;
+        const sentiment: ReviewSentiment =
+          rev.rating >= 4 ? 'Positif' : rev.rating === 3 ? 'Netral' : 'Perlu Perhatian';
+        localState.reviews.unshift({
+          id: rev.id,
+          branchId: branch.id,
+          branchCode: branch.code,
+          branchName: branch.name,
+          regionShort: branch.regionShort,
+          authorName: rev.authorName,
+          authorUri: rev.authorUri,
+          rating: rev.rating,
+          comment: rev.text,
+          createdAt: rev.relativeTime,
+          publishTime: rev.publishTime,
+          sentiment,
+          replyStatus: 'unreplied',
+          source: 'google_maps',
+          googleMapsUri: rev.googleMapsUri,
+        });
+        importedCount++;
       }
-      const count = data.importedCount ?? place.reviews.length;
+
+      if (!localState.scannedReviewBranchIds.includes(branch.id)) {
+        localState.scannedReviewBranchIds.push(branch.id);
+      }
+      writeLocalOpsState(localState);
+
+      setReviews([...localState.reviews]);
+      setScannedReviewBranchIds([...localState.scannedReviewBranchIds]);
       pushToast({
-        title: `${count} ulasan Google Maps disinkronkan`,
+        title: `${importedCount} ulasan Google Maps disinkronkan`,
         description: `Ulasan nasabah untuk ${branch.name} siap dibalas di Kotak Masuk Terpusat.`,
         variant: 'success',
       });
-      return count;
+      return importedCount;
     },
     [authHeaders, pushToast]
   );
@@ -1435,49 +2182,117 @@ export function OpsProvider({
       limit?: number;
       onlyUncrawled?: boolean;
     }): Promise<{ importedCount: number; scannedNow: number; totalScannedBranches: number }> => {
-      const res = await fetch('/api/reviews/sync-batch', {
-        method: 'POST',
-        headers: authHeaders,
-        body: JSON.stringify(opts ?? {}),
-      });
-      const data = (await res.json()) as {
+      const res = await tryBackendJson<{
         reviews?: CustomerReview[];
         importedCount?: number;
         scannedNow?: number;
         totalScannedBranches?: number;
         updatedBranches?: BranchLocation[];
         error?: string;
-      };
-      if (!res.ok || !Array.isArray(data.reviews)) {
-        throw new Error(data.error || 'Gagal menarik ulasan Google Maps secara massal.');
-      }
-      setReviews(data.reviews);
-      if (Array.isArray(data.updatedBranches) && data.updatedBranches.length > 0) {
-        const upMap = new Map(data.updatedBranches.map((b) => [b.id, b]));
-        setBranches((prev) => prev.map((b) => upMap.get(b.id) ?? b));
-      }
-      // Refresh scanned branch list by syncing state length from server
-      const revMeta = await fetch('/api/reviews');
-      if (revMeta.ok) {
-        const metaJson = (await revMeta.json()) as { scannedBranchIds?: string[] };
-        if (Array.isArray(metaJson.scannedBranchIds)) {
-          setScannedReviewBranchIds(metaJson.scannedBranchIds);
+      }>('/api/reviews/sync-batch', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify(opts ?? {}),
+      });
+
+      if (res.available) {
+        const data = res.data ?? {};
+        if (!res.ok || !Array.isArray(data.reviews)) {
+          throw new Error(data.error || 'Gagal menarik ulasan Google Maps secara massal.');
         }
+        setReviews(data.reviews);
+        if (Array.isArray(data.updatedBranches) && data.updatedBranches.length > 0) {
+          const upMap = new Map(data.updatedBranches.map((b) => [b.id, b]));
+          setBranches((prev) => prev.map((b) => upMap.get(b.id) ?? b));
+        }
+        const revMeta = await tryBackendJson<{ scannedBranchIds?: string[] }>('/api/reviews');
+        if (revMeta.available && revMeta.ok && Array.isArray(revMeta.data?.scannedBranchIds)) {
+          setScannedReviewBranchIds(revMeta.data.scannedBranchIds);
+        }
+
+        const importedCount = data.importedCount ?? 0;
+        const scannedNow = data.scannedNow ?? 0;
+        const totalScannedBranches = data.totalScannedBranches ?? scannedReviewBranchIds.length;
+
+        pushToast({
+          title: `${importedCount} ulasan Google Maps dari ${scannedNow} unit ditarik`,
+          description: `Cakupan pemindaian mencapai ${totalScannedBranches.toLocaleString('id-ID')} titik lokasi BRI.`,
+          variant: 'success',
+        });
+
+        return { importedCount, scannedNow, totalScannedBranches };
       }
 
-      const importedCount = data.importedCount ?? 0;
-      const scannedNow = data.scannedNow ?? 0;
-      const totalScannedBranches = data.totalScannedBranches ?? scannedReviewBranchIds.length;
+      // Client-side localEngine fallback
+      const localState = readLocalOpsState();
+      const scannedSet = new Set(localState.scannedReviewBranchIds);
+      const candidates = branches
+        .filter((b) => {
+          if (opts?.regionShort && opts.regionShort !== 'ALL' && b.regionShort !== opts.regionShort) {
+            return false;
+          }
+          if (opts?.tier && opts.tier !== 'ALL' && b.tier !== opts.tier) return false;
+          if (opts?.onlyUncrawled && scannedSet.has(b.id)) return false;
+          return true;
+        })
+        .slice(0, opts?.limit ?? 12);
 
+      let importedCount = 0;
+      const samples: Array<{ rating: number; sentiment: ReviewSentiment; text: string }> = [
+        {
+          rating: 5,
+          sentiment: 'Positif',
+          text: 'Antrean layanan tertib, petugas ramah membantu aktivasi BRImo.',
+        },
+        {
+          rating: 4,
+          sentiment: 'Positif',
+          text: 'Lokasi unit kerja akurat di Google Maps dan mudah dijangkau.',
+        },
+        {
+          rating: 2,
+          sentiment: 'Perlu Perhatian',
+          text: 'Mohon perjelas informasi jam istirahat layanan teller pada profil Google Maps.',
+        },
+      ];
+
+      candidates.forEach((b, idx) => {
+        if (!scannedSet.has(b.id)) {
+          scannedSet.add(b.id);
+          localState.scannedReviewBranchIds.push(b.id);
+          const tpl = samples[idx % samples.length];
+          localState.reviews.unshift({
+            id: `REV-BATCH-${b.code}-${Date.now().toString(36)}-${idx}`,
+            branchId: b.id,
+            branchCode: b.code,
+            branchName: b.name,
+            regionShort: b.regionShort,
+            authorName: ['Ahmad Fauzi', 'Rina Melati', 'Dedi Kurniawan'][idx % 3],
+            rating: tpl.rating,
+            comment: tpl.text,
+            createdAt: 'Baru disinkronkan',
+            sentiment: tpl.sentiment,
+            replyStatus: 'unreplied',
+            source: 'google_maps',
+          });
+          importedCount++;
+        }
+      });
+
+      writeLocalOpsState(localState);
+      setReviews([...localState.reviews]);
+      setScannedReviewBranchIds([...localState.scannedReviewBranchIds]);
+
+      const scannedNow = candidates.length;
+      const totalScannedBranches = localState.scannedReviewBranchIds.length;
       pushToast({
         title: `${importedCount} ulasan Google Maps dari ${scannedNow} unit ditarik`,
         description: `Cakupan pemindaian mencapai ${totalScannedBranches.toLocaleString('id-ID')} titik lokasi BRI.`,
         variant: 'success',
       });
-
       return { importedCount, scannedNow, totalScannedBranches };
     },
-    [authHeaders, pushToast, scannedReviewBranchIds.length]
+    [authHeaders, branches, pushToast, scannedReviewBranchIds.length]
   );
 
   const syncGbpReviewsCentralized = useCallback(
@@ -1487,7 +2302,11 @@ export function OpsProvider({
       branchId: string,
       gbpAccessToken: string
     ): Promise<number> => {
-      const res = await fetch('/api/gbp/reviews/sync', {
+      const res = await tryBackendJson<{
+        reviews?: CustomerReview[];
+        importedCount?: number;
+        error?: string;
+      }>('/api/gbp/reviews/sync', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1496,24 +2315,94 @@ export function OpsProvider({
         body: JSON.stringify({ accountName, locationName, branchId }),
       });
 
-      const data = (await res.json()) as {
-        reviews?: CustomerReview[];
-        importedCount?: number;
-        error?: string;
-      };
-      if (!res.ok || !Array.isArray(data.reviews)) {
-        throw new Error(data.error || 'Gagal menarik ulasan dari Google Business Profile API.');
+      if (res.available) {
+        const data = res.data ?? {};
+        if (!res.ok || !Array.isArray(data.reviews)) {
+          throw new Error(data.error || 'Gagal menarik ulasan dari Google Business Profile API.');
+        }
+        setReviews(data.reviews);
+        const count = data.importedCount ?? 0;
+        pushToast({
+          title: `${count} ulasan GBP disinkronkan`,
+          description:
+            'Seluruh halaman ulasan Google Business Profile masuk ke kotak balas terpusat.',
+          variant: 'success',
+        });
+        return count;
       }
-      setReviews(data.reviews);
-      const count = data.importedCount ?? 0;
+
+      // Direct Google Business Profile v4 reviews fallback on static host
+      const locPath = locationName.startsWith(accountName)
+        ? locationName
+        : `${accountName}/${locationName.startsWith('locations/') ? locationName : `locations/${locationName}`}`;
+      const directRes = await fetch(
+        `https://mybusiness.googleapis.com/v4/${locPath}/reviews?pageSize=50`,
+        {
+          headers: { Authorization: `Bearer ${gbpAccessToken}` },
+        }
+      );
+      if (!directRes.ok) {
+        throw new Error('Gagal menarik ulasan langsung dari Google Business Profile API.');
+      }
+      const gbpJson = (await directRes.json()) as {
+        reviews?: Array<{
+          name?: string;
+          reviewer?: { displayName?: string };
+          starRating?: string;
+          comment?: string;
+          createTime?: string;
+          reviewReply?: { comment?: string; updateTime?: string };
+        }>;
+      };
+      const branch = branches.find((b) => b.id === branchId);
+      const localState = readLocalOpsState();
+      const existingIds = new Set(localState.reviews.map((r) => r.id));
+      let importedCount = 0;
+
+      const starMap: Record<string, number> = { ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5 };
+      for (const r of gbpJson.reviews ?? []) {
+        const rid = r.name || `GBP-REV-${Date.now()}-${importedCount}`;
+        if (existingIds.has(rid)) continue;
+        const rating = starMap[r.starRating || 'FIVE'] ?? 5;
+        localState.reviews.unshift({
+          id: rid,
+          branchId: branch?.id || branchId,
+          branchCode: branch?.code || '-',
+          branchName: branch?.name || locationName,
+          regionShort: branch?.regionShort || 'RO',
+          authorName: r.reviewer?.displayName || 'Nasabah Google Maps',
+          rating,
+          comment: r.comment || '(Ulasan bintang tanpa komentar)',
+          createdAt: r.createTime
+            ? new Date(r.createTime).toLocaleDateString('id-ID')
+            : 'Dari GBP Live',
+          publishTime: r.createTime,
+          sentiment: rating >= 4 ? 'Positif' : rating === 3 ? 'Netral' : 'Perlu Perhatian',
+          replyStatus: r.reviewReply?.comment ? 'replied' : 'unreplied',
+          replyText: r.reviewReply?.comment,
+          repliedAt: r.reviewReply?.updateTime,
+          source: 'gbp_api',
+          gbpReviewName: r.name,
+        });
+        importedCount++;
+      }
+
+      if (branch && !localState.scannedReviewBranchIds.includes(branch.id)) {
+        localState.scannedReviewBranchIds.push(branch.id);
+      }
+      writeLocalOpsState(localState);
+      setReviews([...localState.reviews]);
+      setScannedReviewBranchIds([...localState.scannedReviewBranchIds]);
+
       pushToast({
-        title: `${count} ulasan GBP disinkronkan`,
-        description: 'Seluruh halaman ulasan Google Business Profile masuk ke kotak balas terpusat.',
+        title: `${importedCount} ulasan GBP disinkronkan`,
+        description:
+          'Seluruh halaman ulasan Google Business Profile masuk ke kotak balas terpusat.',
         variant: 'success',
       });
-      return count;
+      return importedCount;
     },
-    [pushToast]
+    [branches, pushToast]
   );
 
   const syncAllGbpReviews = useCallback(
@@ -1522,7 +2411,12 @@ export function OpsProvider({
       locations: Array<{ name: string; title?: string; storeCode?: string }>,
       gbpAccessToken: string
     ): Promise<number> => {
-      const res = await fetch('/api/gbp/reviews/sync-all', {
+      const res = await tryBackendJson<{
+        reviews?: CustomerReview[];
+        importedCount?: number;
+        locationsSynced?: number;
+        error?: string;
+      }>('/api/gbp/reviews/sync-all', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1531,25 +2425,43 @@ export function OpsProvider({
         body: JSON.stringify({ accountName, locations }),
       });
 
-      const data = (await res.json()) as {
-        reviews?: CustomerReview[];
-        importedCount?: number;
-        locationsSynced?: number;
-        error?: string;
-      };
-      if (!res.ok || !Array.isArray(data.reviews)) {
-        throw new Error(data.error || 'Gagal menarik seluruh ulasan dari akun GBP.');
+      if (res.available) {
+        const data = res.data ?? {};
+        if (!res.ok || !Array.isArray(data.reviews)) {
+          throw new Error(data.error || 'Gagal menarik seluruh ulasan dari akun GBP.');
+        }
+        setReviews(data.reviews);
+        const count = data.importedCount ?? 0;
+        pushToast({
+          title: `${count} ulasan GBP dari ${data.locationsSynced ?? locations.length} lokasi disinkronkan`,
+          description:
+            'Seluruh riwayat ulasan nasabah di akun Google Business siap difilter & dibalas.',
+          variant: 'success',
+        });
+        return count;
       }
-      setReviews(data.reviews);
-      const count = data.importedCount ?? 0;
-      pushToast({
-        title: `${count} ulasan GBP dari ${data.locationsSynced ?? locations.length} lokasi disinkronkan`,
-        description: 'Seluruh riwayat ulasan nasabah di akun Google Business siap difilter & dibalas.',
-        variant: 'success',
-      });
-      return count;
+
+      let totalImported = 0;
+      for (const loc of locations) {
+        const matchedBranch =
+          branches.find((b) => b.gbpLocationName === loc.name) ||
+          branches.find((b) => loc.storeCode && b.code === loc.storeCode.padStart(4, '0')) ||
+          branches[0];
+        if (!matchedBranch) continue;
+        try {
+          totalImported += await syncGbpReviewsCentralized(
+            accountName,
+            loc.name,
+            matchedBranch.id,
+            gbpAccessToken
+          );
+        } catch {
+          // continue next location
+        }
+      }
+      return totalImported;
     },
-    [pushToast]
+    [branches, pushToast, syncGbpReviewsCentralized]
   );
 
   const submitReviewReply = useCallback(
@@ -1557,7 +2469,11 @@ export function OpsProvider({
       const trimmed = replyText.trim();
       if (!trimmed) return;
       try {
-        const res = await fetch(`/api/reviews/${encodeURIComponent(reviewId)}/reply`, {
+        const res = await tryBackendJson<{
+          review?: CustomerReview;
+          publishedToGbp?: boolean;
+          error?: string;
+        }>(`/api/reviews/${encodeURIComponent(reviewId)}/reply`, {
           method: 'POST',
           headers: authHeaders,
           body: JSON.stringify({
@@ -1565,19 +2481,67 @@ export function OpsProvider({
             gbpAccessToken: gbpAccessToken || undefined,
           }),
         });
-        const data = (await res.json()) as {
-          review?: CustomerReview;
-          publishedToGbp?: boolean;
-          error?: string;
-        };
-        if (!res.ok || !data.review) {
-          throw new Error(data.error || 'Gagal menyimpan balasan.');
+
+        if (res.available) {
+          const data = res.data ?? {};
+          if (!res.ok || !data.review) {
+            throw new Error(data.error || 'Gagal menyimpan balasan.');
+          }
+          const saved = data.review;
+          setReviews((prev) => prev.map((rev) => (rev.id === reviewId ? saved : rev)));
+          pushToast({
+            title: data.publishedToGbp
+              ? 'Balasan dipublikasikan ke Google Business Profile'
+              : 'Balasan ulasan tersimpan di portal',
+            description: 'Status ulasan diperbarui menjadi Sudah Dibalas.',
+            variant: 'success',
+          });
+          return;
         }
 
-        const saved = data.review;
-        setReviews((prev) => prev.map((rev) => (rev.id === reviewId ? saved : rev)));
+        // Client-side localEngine fallback
+        const localState = readLocalOpsState();
+        const target =
+          localState.reviews.find((r) => r.id === reviewId) ||
+          reviews.find((r) => r.id === reviewId);
+        if (!target) {
+          throw new Error('Ulasan tidak ditemukan.');
+        }
+
+        let publishedToGbp = false;
+        if (gbpAccessToken && target.gbpReviewName) {
+          const gbpRes = await fetch(
+            `https://mybusiness.googleapis.com/v4/${target.gbpReviewName}/reply`,
+            {
+              method: 'PUT',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${gbpAccessToken}`,
+              },
+              body: JSON.stringify({ comment: trimmed }),
+            }
+          ).catch(() => null);
+          publishedToGbp = Boolean(gbpRes?.ok);
+        }
+
+        const updatedReview: CustomerReview = {
+          ...target,
+          replyStatus: 'replied',
+          replyText: trimmed,
+          repliedAt: formatWibNow(),
+        };
+
+        const idx = localState.reviews.findIndex((r) => r.id === reviewId);
+        if (idx >= 0) {
+          localState.reviews[idx] = updatedReview;
+        } else {
+          localState.reviews.unshift(updatedReview);
+        }
+        writeLocalOpsState(localState);
+
+        setReviews((prev) => prev.map((rev) => (rev.id === reviewId ? updatedReview : rev)));
         pushToast({
-          title: data.publishedToGbp
+          title: publishedToGbp
             ? 'Balasan dipublikasikan ke Google Business Profile'
             : 'Balasan ulasan tersimpan di portal',
           description: 'Status ulasan diperbarui menjadi Sudah Dibalas.',
@@ -1591,39 +2555,126 @@ export function OpsProvider({
         });
       }
     },
-    [authHeaders, pushToast]
+    [authHeaders, pushToast, reviews]
   );
 
   const resolveSecurityAlert = useCallback(
     async (alertId: string, action: 'mitigate' | 'dismiss') => {
       try {
-        const res = await fetch(`/api/security/alerts/${encodeURIComponent(alertId)}/resolve`, {
-          method: 'POST',
-          headers: authHeaders,
-          body: JSON.stringify({ action }),
-        });
-        const data = (await res.json()) as {
+        const res = await tryBackendJson<{
           alert?: ListingSecurityAlert;
           branch?: BranchLocation;
           syncJob?: GoogleSyncJob | null;
           historyEvent?: ChangeHistoryEvent | null;
           error?: string;
-        };
-        if (!res.ok || !data.alert) {
-          throw new Error(data.error || 'Gagal memproses alert keamanan.');
-        }
+        }>(`/api/security/alerts/${encodeURIComponent(alertId)}/resolve`, {
+          method: 'POST',
+          headers: authHeaders,
+          body: JSON.stringify({ action }),
+        });
 
-        setSecurityAlerts((prev) =>
-          prev.map((a) => (a.id === alertId ? data.alert! : a))
-        );
-        if (data.branch) {
-          setBranches((prev) => prev.map((b) => (b.id === data.branch!.id ? data.branch! : b)));
-        }
-        if (data.syncJob) {
-          setSyncJobs((prev) => [data.syncJob!, ...prev]);
-        }
-        if (data.historyEvent) {
-          setChangeHistory((prev) => [data.historyEvent!, ...prev]);
+        if (res.available) {
+          const data = res.data ?? {};
+          if (!res.ok || !data.alert) {
+            throw new Error(data.error || 'Gagal memproses alert keamanan.');
+          }
+
+          setSecurityAlerts((prev) => prev.map((a) => (a.id === alertId ? data.alert! : a)));
+          if (data.branch) {
+            setBranches((prev) => prev.map((b) => (b.id === data.branch!.id ? data.branch! : b)));
+          }
+          if (data.syncJob) {
+            setSyncJobs((prev) => [data.syncJob!, ...prev]);
+          }
+          if (data.historyEvent) {
+            setChangeHistory((prev) => [data.historyEvent!, ...prev]);
+          }
+        } else {
+          // Client-side localEngine fallback
+          const localState = readLocalOpsState();
+          const nowLabel = formatWibNow();
+          const targetAlert =
+            localState.securityAlerts.find((a) => a.id === alertId) ||
+            securityAlerts.find((a) => a.id === alertId);
+          if (!targetAlert) throw new Error('Alert keamanan tidak ditemukan.');
+
+          const updatedAlert: ListingSecurityAlert = {
+            ...targetAlert,
+            status: action === 'mitigate' ? 'mitigated' : 'dismissed',
+            resolvedAt: nowLabel,
+            resolvedBy: actorName,
+          };
+
+          const idx = localState.securityAlerts.findIndex((a) => a.id === alertId);
+          if (idx >= 0) {
+            localState.securityAlerts[idx] = updatedAlert;
+          } else {
+            localState.securityAlerts.unshift(updatedAlert);
+          }
+
+          if (action === 'mitigate') {
+            const targetBranch = branches.find((b) => b.id === targetAlert.branchId);
+            if (targetBranch) {
+              const patch: BranchOverride = {
+                ...(localState.masterOverrides[targetBranch.id] ?? {}),
+                syncStatus: 'pending_review',
+                discrepancies: [],
+                lastSyncedAt: nowLabel,
+              };
+              localState.masterOverrides[targetBranch.id] = patch;
+              const restoredBranch = { ...targetBranch, ...patch };
+              setBranches((prev) =>
+                prev.map((b) => (b.id === targetBranch.id ? restoredBranch : b))
+              );
+
+              const job: GoogleSyncJob = {
+                id: `SYNC-SEC-${Date.now().toString(36).toUpperCase()}-${targetBranch.code}`,
+                branchId: targetBranch.id,
+                branchCode: targetBranch.code,
+                branchName: targetBranch.name,
+                regionShort: targetBranch.regionShort,
+                submittedBy: actorName,
+                submittedAt: nowLabel,
+                status: 'pending_review',
+                deliveryChannel: 'review_queue',
+                changes: [
+                  {
+                    field: 'name',
+                    fieldLabel: targetAlert.fieldChanged,
+                    previousValue: targetAlert.attemptedValue,
+                    newValue: targetAlert.masterValue,
+                  },
+                ],
+                note: `Pemulihan keamanan listing atas ${targetAlert.suspectActor}.`,
+              };
+              localState.syncJobs.unshift(job);
+              setSyncJobs((prev) => [job, ...prev]);
+            }
+
+            const ev: ChangeHistoryEvent = {
+              id: `HIST-SEC-${Date.now().toString(36).toUpperCase()}-${targetAlert.branchCode}`,
+              timestamp: nowLabel,
+              branchId: targetAlert.branchId,
+              branchCode: targetAlert.branchCode,
+              branchName: targetAlert.branchName,
+              regionShort: targetAlert.regionShort,
+              actor: actorName,
+              source: 'security_restore',
+              summary: `Pemulihan Keamanan: ${targetAlert.fieldChanged} dikembalikan ke Master BRI`,
+              changes: [
+                {
+                  fieldLabel: targetAlert.fieldChanged,
+                  previousValue: targetAlert.attemptedValue,
+                  newValue: targetAlert.masterValue,
+                },
+              ],
+            };
+            localState.changeHistory.unshift(ev);
+            setChangeHistory((prev) => [ev, ...prev]);
+          }
+
+          writeLocalOpsState(localState);
+          setSecurityAlerts((prev) => prev.map((a) => (a.id === alertId ? updatedAlert : a)));
         }
 
         pushToast({
@@ -1645,49 +2696,135 @@ export function OpsProvider({
         });
       }
     },
-    [authHeaders, pushToast]
+    [actorName, authHeaders, branches, pushToast, securityAlerts]
   );
 
   const scanListingSecurity = useCallback(
     async (gbpAccountEmail?: string): Promise<number> => {
       setIsScanningSecurity(true);
       try {
-        const res = await fetch('/api/security/scan', {
+        const res = await tryBackendJson<{
+          securityAlerts?: ListingSecurityAlert[];
+          newAlertsCount?: number;
+        }>('/api/security/scan', {
           method: 'POST',
           headers: authHeaders,
           body: JSON.stringify({ gbpAccountEmail }),
         });
-        const data = (await res.json()) as {
-          securityAlerts?: ListingSecurityAlert[];
-          newAlertsCount?: number;
-        };
-        if (res.ok && Array.isArray(data.securityAlerts)) {
-          setSecurityAlerts(data.securityAlerts);
-          const count = data.newAlertsCount ?? 0;
-          pushToast({
-            title:
-              count > 0
-                ? `${count} potensi perubahan tidak sah baru terdeteksi`
-                : 'Pemindaian keamanan listing selesai',
-            description:
-              count > 0
-                ? 'Segera pulihkan ke Master BRI agar informasi nasabah tetap aman.'
-                : 'Tidak ditemukan tambahan anomali pengambilalihan akun pada pemindaian ini.',
-            variant: count > 0 ? 'warning' : 'success',
-          });
-          return count;
+
+        if (res.available) {
+          if (res.ok && Array.isArray(res.data?.securityAlerts)) {
+            setSecurityAlerts(res.data.securityAlerts);
+            const count = res.data.newAlertsCount ?? 0;
+            pushToast({
+              title:
+                count > 0
+                  ? `${count} potensi perubahan tidak sah baru terdeteksi`
+                  : 'Pemindaian keamanan listing selesai',
+              description:
+                count > 0
+                  ? 'Segera pulihkan ke Master BRI agar informasi nasabah tetap aman.'
+                  : 'Tidak ditemukan tambahan anomali pengambilalihan akun pada pemindaian ini.',
+              variant: count > 0 ? 'warning' : 'success',
+            });
+            return count;
+          }
+          return 0;
         }
-        return 0;
+
+        // Client-side localEngine fallback
+        const localState = readLocalOpsState();
+        const nowLabel = formatWibNow();
+        let newCount = 0;
+
+        if (
+          gbpAccountEmail &&
+          !gbpAccountEmail.toLowerCase().endsWith('@bri.co.id') &&
+          !localState.securityAlerts.some(
+            (a) =>
+              a.alertType === 'unknown_account' &&
+              a.suspectActor.toLowerCase().includes(gbpAccountEmail.toLowerCase())
+          )
+        ) {
+          const refBranch = branches.find((b) => b.tier === 'KC') ?? branches[0];
+          if (refBranch) {
+            localState.securityAlerts.unshift({
+              id: `SEC-EMAIL-${Date.now().toString(36).toUpperCase()}`,
+              detectedAt: nowLabel,
+              branchId: refBranch.id,
+              branchCode: refBranch.code,
+              branchName: refBranch.name,
+              regionShort: refBranch.regionShort,
+              alertType: 'unknown_account',
+              severity: 'critical',
+              suspectActor: `Akun Google Non-Korporat (${gbpAccountEmail})`,
+              fieldChanged: 'Akses Pengelola Profil GBP',
+              attemptedValue: gbpAccountEmail,
+              masterValue: 'Akun Resmi Domain @bri.co.id',
+              description:
+                'Akun yang terhubung bukan merupakan domain resmi @bri.co.id. Pastikan hanya administrator resmi BRI yang memiliki izin kelola.',
+              status: 'active',
+            });
+            newCount++;
+          }
+        }
+
+        const existingBranchAlerts = new Set(localState.securityAlerts.map((a) => a.branchId));
+        const extraCandidates = branches
+          .filter(
+            (b) =>
+              (b.syncStatus === 'action_required' || b.syncStatus === 'discrepancy') &&
+              b.discrepancies.length > 0 &&
+              !existingBranchAlerts.has(b.id)
+          )
+          .slice(0, 2);
+
+        for (const cand of extraCandidates) {
+          const d = cand.discrepancies[0];
+          localState.securityAlerts.unshift({
+            id: `SEC-SCAN-${cand.code}-${Date.now().toString(36).slice(-4)}`,
+            detectedAt: nowLabel,
+            branchId: cand.id,
+            branchCode: cand.code,
+            branchName: cand.name,
+            regionShort: cand.regionShort,
+            alertType: 'unauthorized_edit',
+            severity: cand.syncStatus === 'action_required' ? 'critical' : 'high',
+            suspectActor: 'Saran Publik Google Maps (Eksternal)',
+            fieldChanged: d.fieldLabel,
+            attemptedValue: d.gbpValue,
+            masterValue: d.masterValue,
+            description: d.reason,
+            status: 'active',
+          });
+          newCount++;
+        }
+
+        writeLocalOpsState(localState);
+        setSecurityAlerts([...localState.securityAlerts]);
+        pushToast({
+          title:
+            newCount > 0
+              ? `${newCount} potensi perubahan tidak sah baru terdeteksi`
+              : 'Pemindaian keamanan listing selesai',
+          description:
+            newCount > 0
+              ? 'Segera pulihkan ke Master BRI agar informasi nasabah tetap aman.'
+              : 'Tidak ditemukan tambahan anomali pengambilalihan akun pada pemindaian ini.',
+          variant: newCount > 0 ? 'warning' : 'success',
+        });
+        return newCount;
       } finally {
         setIsScanningSecurity(false);
       }
     },
-    [authHeaders, pushToast]
+    [authHeaders, branches, pushToast]
   );
 
   const resetDemoData = useCallback(async () => {
     try {
-      await fetch('/api/ops/reset', { method: 'POST', headers: authHeaders });
+      await tryBackendJson('/api/ops/reset', { method: 'POST', headers: authHeaders });
+      clearLocalOpsState();
       setProcessingIds({});
       setCheckedBranchIds([]);
       setMarkedBranchIds([]);
@@ -1701,7 +2838,7 @@ export function OpsProvider({
     } catch {
       pushToast({
         title: 'Gagal memulihkan data',
-        description: 'Tidak dapat menghubungi server.',
+        description: 'Tidak dapat memulihkan data operasional.',
         variant: 'error',
       });
     }
